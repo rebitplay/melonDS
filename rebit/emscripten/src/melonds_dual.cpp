@@ -44,10 +44,9 @@ constexpr int ScreenWidth = 256;
 constexpr int ScreenHeight = 192;
 constexpr int CombinedHeight = ScreenHeight * 2;
 constexpr int AudioScratchFrames = 4096;
-// All consoles advance concurrently behind the same frame barrier, so a peer
-// only needs a short scheduling window to publish its LocalMP packet. The Qt
-// frontend's longer network-oriented timeout needlessly stalls browser frames.
-constexpr int LocalMultiplayerReceiveTimeoutMs = 5;
+// LocalMP calls are cooperatively ordered below, so receive operations must
+// never make correctness depend on a host scheduler or wall-clock timeout.
+constexpr int LocalMultiplayerReceiveTimeoutMs = 0;
 
 struct InputState
 {
@@ -78,13 +77,62 @@ struct Runtime
     std::string error;
     std::uint64_t generation = 0;
     int completed = 0;
+    std::atomic<std::uint32_t> multiplayerDoneMask {0};
+    std::atomic<std::uint64_t> multiplayerReplySequence {0};
+    std::atomic<int> multiplayerTurn {-1};
     int visiblePlayer = 0;
     bool shuttingDown = false;
+    std::atomic<bool> multiplayerFrameActive {false};
     bool loaded = false;
     double lastFrameMs = 0.0;
 };
 
 Runtime State;
+
+int NextMultiplayerTurn(int current, std::uint32_t doneMask)
+{
+    const int players = static_cast<int>(State.slots.size());
+    for (int offset = 1; offset <= players; ++offset)
+    {
+        const int candidate = (current + offset) % players;
+        if ((doneMask & (1U << candidate)) == 0)
+            return candidate;
+    }
+    return -1;
+}
+
+void BeginMultiplayerFrame()
+{
+    State.multiplayerDoneMask.store(0, std::memory_order_release);
+    State.multiplayerTurn.store(State.slots.empty() ? -1 : 0, std::memory_order_release);
+    State.multiplayerFrameActive.store(!State.slots.empty(), std::memory_order_release);
+}
+
+void CompleteMultiplayerFrame(int player)
+{
+    if (!State.multiplayerFrameActive.load(std::memory_order_acquire)
+        || player < 0
+        || player >= static_cast<int>(State.slots.size()))
+        return;
+    const std::uint32_t doneMask = State.multiplayerDoneMask.fetch_or(1U << player, std::memory_order_acq_rel) | (1U << player);
+    const std::uint32_t allDoneMask = (1U << State.slots.size()) - 1U;
+    if (doneMask == allDoneMask)
+    {
+        State.multiplayerFrameActive.store(false, std::memory_order_release);
+        State.multiplayerTurn.store(-1, std::memory_order_release);
+    }
+    else if (State.multiplayerTurn.load(std::memory_order_acquire) == player)
+    {
+        State.multiplayerTurn.store(NextMultiplayerTurn(player, doneMask), std::memory_order_release);
+    }
+}
+
+void CancelMultiplayerFrame()
+{
+    State.multiplayerFrameActive.store(false, std::memory_order_release);
+    State.multiplayerDoneMask.store(0, std::memory_order_release);
+    State.multiplayerTurn.store(-1, std::memory_order_release);
+}
 
 std::uint64_t Fnv1a(const void* data, std::size_t size, std::uint64_t hash = 1469598103934665603ULL)
 {
@@ -139,6 +187,7 @@ void WorkerLoop(Slot* slot)
         else
             slot->console->ReleaseScreen();
         slot->console->RunFrame();
+        CompleteMultiplayerFrame(slot->context.id);
 
         lock.lock();
         ++State.completed;
@@ -149,6 +198,7 @@ void WorkerLoop(Slot* slot)
 
 void StopRuntime()
 {
+    CancelMultiplayerFrame();
     {
         std::lock_guard<std::mutex> guard(State.frameMutex);
         State.shuttingDown = true;
@@ -174,7 +224,9 @@ void StopRuntime()
     State.visiblePlayer = 0;
     State.generation = 0;
     State.completed = 0;
+    State.multiplayerTurn.store(-1, std::memory_order_release);
     State.shuttingDown = false;
+    State.multiplayerFrameActive.store(false, std::memory_order_release);
     State.loaded = false;
     State.lastFrameMs = 0.0;
 }
@@ -245,6 +297,79 @@ SlotContext* Context(void* userdata) noexcept
 melonDS::LocalMP* LocalMultiplayer() noexcept
 {
     return State.multiplayer.get();
+}
+
+bool EnterMultiplayerTurn(void* userdata) noexcept
+{
+    const int player = InstanceId(userdata);
+    if (player < 0 || player >= static_cast<int>(State.slots.size()))
+        return false;
+    const std::uint32_t playerBit = 1U << player;
+    while (State.multiplayerFrameActive.load(std::memory_order_acquire)
+        && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
+        && State.multiplayerTurn.load(std::memory_order_acquire) != player)
+        std::this_thread::yield();
+
+    return State.multiplayerFrameActive.load(std::memory_order_acquire)
+        && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
+        && State.multiplayerTurn.load(std::memory_order_acquire) == player;
+}
+
+void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept
+{
+    if (!scheduled)
+        return;
+    const int player = InstanceId(userdata);
+    if (State.multiplayerFrameActive.load(std::memory_order_acquire)
+        && State.multiplayerTurn.load(std::memory_order_acquire) == player)
+    {
+        const int next = NextMultiplayerTurn(player, State.multiplayerDoneMask.load(std::memory_order_acquire));
+        if (next >= 0)
+            State.multiplayerTurn.store(next, std::memory_order_release);
+    }
+}
+
+void NoteMultiplayerCommand(void* userdata) noexcept
+{
+    if (auto* context = Context(userdata))
+    {
+        context->replyBaseline.store(State.multiplayerReplySequence.load(std::memory_order_acquire), std::memory_order_release);
+        context->awaitingReplies.store(true, std::memory_order_release);
+    }
+}
+
+void NoteMultiplayerReply() noexcept
+{
+    State.multiplayerReplySequence.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void AwaitMultiplayerReplies(void* userdata) noexcept
+{
+    auto* context = Context(userdata);
+    const int player = InstanceId(userdata);
+    if (!context
+        || !context->awaitingReplies.exchange(false, std::memory_order_acq_rel)
+        || player < 0
+        || player >= static_cast<int>(State.slots.size())
+        || !State.multiplayerFrameActive.load(std::memory_order_acquire))
+        return;
+
+    const std::uint64_t baseline = context->replyBaseline.load(std::memory_order_acquire);
+    const std::uint32_t playerBit = 1U << player;
+    const std::uint32_t allPlayersMask = (1U << State.slots.size()) - 1U;
+    const std::uint32_t otherPlayersMask = allPlayersMask & ~playerBit;
+    while (State.multiplayerFrameActive.load(std::memory_order_acquire)
+        && State.multiplayerReplySequence.load(std::memory_order_acquire) <= baseline
+        && (State.multiplayerDoneMask.load(std::memory_order_acquire) & otherPlayersMask) != otherPlayersMask)
+    {
+        if (State.multiplayerTurn.load(std::memory_order_acquire) == player)
+        {
+            const int next = NextMultiplayerTurn(player, State.multiplayerDoneMask.load(std::memory_order_acquire));
+            if (next >= 0 && next != player)
+                State.multiplayerTurn.store(next, std::memory_order_release);
+        }
+        std::this_thread::yield();
+    }
 }
 
 void SignalStopped(void* userdata) noexcept
@@ -368,6 +493,7 @@ REBIT_EXPORT int md_run_frame()
         return 0;
 
     const auto started = std::chrono::steady_clock::now();
+    BeginMultiplayerFrame();
     {
         std::unique_lock<std::mutex> lock(State.frameMutex);
         State.completed = 0;

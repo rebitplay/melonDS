@@ -48,6 +48,24 @@ namespace
 
 const auto ClockEpoch = std::chrono::steady_clock::now();
 
+class ScheduledMultiplayerCall
+{
+public:
+    explicit ScheduledMultiplayerCall(void* userdata) noexcept
+        : Userdata(userdata), Scheduled(rebit::EnterMultiplayerTurn(userdata))
+    {
+    }
+
+    ~ScheduledMultiplayerCall() noexcept
+    {
+        rebit::LeaveMultiplayerTurn(Userdata, Scheduled);
+    }
+
+private:
+    void* Userdata;
+    bool Scheduled;
+};
+
 std::string FileModeString(FileMode mode, bool exists)
 {
     char access = 'r';
@@ -343,18 +361,21 @@ void WriteDateTime(int, int, int, int, int, int, void*) {}
 
 void MP_Begin(void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     if (auto* multiplayer = rebit::LocalMultiplayer())
         multiplayer->Begin(rebit::InstanceId(userdata));
 }
 
 void MP_End(void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     if (auto* multiplayer = rebit::LocalMultiplayer())
         multiplayer->End(rebit::InstanceId(userdata));
 }
 
 int MP_SendPacket(u8* data, int length, u64 timestamp, void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     if (auto* context = rebit::Context(userdata))
         ++context->packetsSent;
     auto* multiplayer = rebit::LocalMultiplayer();
@@ -363,6 +384,7 @@ int MP_SendPacket(u8* data, int length, u64 timestamp, void* userdata)
 
 int MP_RecvPacket(u8* data, u64* timestamp, void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     auto* multiplayer = rebit::LocalMultiplayer();
     const int received = multiplayer ? multiplayer->RecvPacket(rebit::InstanceId(userdata), data, timestamp) : 0;
     if (received > 0)
@@ -373,28 +395,36 @@ int MP_RecvPacket(u8* data, u64* timestamp, void* userdata)
 
 int MP_SendCmd(u8* data, int length, u64 timestamp, void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     if (auto* context = rebit::Context(userdata))
     {
         ++context->packetsSent;
         ++context->commands;
     }
     auto* multiplayer = rebit::LocalMultiplayer();
-    return multiplayer ? multiplayer->SendCmd(rebit::InstanceId(userdata), data, length, timestamp) : 0;
+    const int sent = multiplayer ? multiplayer->SendCmd(rebit::InstanceId(userdata), data, length, timestamp) : 0;
+    if (sent > 0)
+        rebit::NoteMultiplayerCommand(userdata);
+    return sent;
 }
 
 int MP_SendReply(u8* data, int length, u64 timestamp, u16 aid, void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     if (auto* context = rebit::Context(userdata))
     {
         ++context->packetsSent;
         ++context->replies;
     }
     auto* multiplayer = rebit::LocalMultiplayer();
-    return multiplayer ? multiplayer->SendReply(rebit::InstanceId(userdata), data, length, timestamp, aid) : 0;
+    const int sent = multiplayer ? multiplayer->SendReply(rebit::InstanceId(userdata), data, length, timestamp, aid) : 0;
+    rebit::NoteMultiplayerReply();
+    return sent;
 }
 
 int MP_SendAck(u8* data, int length, u64 timestamp, void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     if (auto* context = rebit::Context(userdata))
         ++context->packetsSent;
     auto* multiplayer = rebit::LocalMultiplayer();
@@ -403,14 +433,9 @@ int MP_SendAck(u8* data, int length, u64 timestamp, void* userdata)
 
 int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata)
 {
+    ScheduledMultiplayerCall scheduled(userdata);
     auto* multiplayer = rebit::LocalMultiplayer();
-    // LocalMP's desktop frontend blocks here so independently-running emulator
-    // windows can wait for the host's next frame. This runtime advances every
-    // console behind one lockstep video-frame barrier; blocking a client on a
-    // future host frame would therefore prevent the host from reaching it.
-    // Poll the same packet FIFO nonblocking and let the next lockstep frame
-    // deliver a packet that was not ready yet.
-    const int received = multiplayer ? multiplayer->RecvPacket(rebit::InstanceId(userdata), data, timestamp) : 0;
+    const int received = multiplayer ? multiplayer->RecvHostPacket(rebit::InstanceId(userdata), data, timestamp) : 0;
     if (received > 0)
         if (auto* context = rebit::Context(userdata))
             ++context->packetsReceived;
@@ -419,6 +444,8 @@ int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata)
 
 u16 MP_RecvReplies(u8* data, u64 timestamp, u16 aidMask, void* userdata)
 {
+    rebit::AwaitMultiplayerReplies(userdata);
+    ScheduledMultiplayerCall scheduled(userdata);
     auto* multiplayer = rebit::LocalMultiplayer();
     const u16 replies = multiplayer ? multiplayer->RecvReplies(rebit::InstanceId(userdata), data, timestamp, aidMask) : 0;
     if (replies != 0)
