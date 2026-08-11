@@ -40,7 +40,7 @@ target_include_directories(melonds_dual PRIVATE
 )
 
 target_link_libraries(melonds_dual PRIVATE core Threads::Threads)
-target_compile_definitions(melonds_dual PRIVATE REBIT_MELONDS_DUAL_BUILD="melonds-dual-3")
+target_compile_definitions(melonds_dual PRIVATE REBIT_MELONDS_DUAL_BUILD="melonds-dual-4")
 
 if(EMSCRIPTEN)
     target_compile_options(core PUBLIC "-pthread")

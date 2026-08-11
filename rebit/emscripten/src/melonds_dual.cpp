@@ -49,6 +49,8 @@ constexpr int AudioScratchFrames = 4096;
 // LocalMP calls are cooperatively ordered below, so receive operations must
 // never make correctness depend on a host scheduler or wall-clock timeout.
 constexpr int LocalMultiplayerReceiveTimeoutMs = 0;
+constexpr auto MultiplayerFrameWatchdog = std::chrono::seconds(2);
+constexpr auto MultiplayerRecoveryWatchdog = std::chrono::seconds(5);
 constexpr std::uint32_t CheckpointMagic = 0x53444E52; // "RNDS" in little endian.
 constexpr std::uint32_t CheckpointVersion = 2;
 constexpr std::uint32_t MaximumConsoleStateBytes = 64 * 1024 * 1024;
@@ -88,6 +90,8 @@ struct Runtime
     std::atomic<std::uint32_t> multiplayerDoneMask {0};
     std::atomic<std::uint64_t> multiplayerReplySequence {0};
     std::atomic<int> multiplayerTurn {-1};
+    std::mutex multiplayerTurnMutex;
+    std::condition_variable multiplayerTurnChanged;
     int visiblePlayer = 0;
     bool shuttingDown = false;
     std::atomic<bool> multiplayerFrameActive {false};
@@ -110,11 +114,26 @@ int NextMultiplayerTurn(int current, std::uint32_t doneMask)
     return -1;
 }
 
+void NotifyMultiplayerProgress()
+{
+    State.multiplayerTurnChanged.notify_all();
+}
+
+void WaitForMultiplayerProgress()
+{
+    // A bounded condition wait avoids burning one browser worker per console
+    // while another console owns the deterministic LocalMP turn. The timeout
+    // closes the notify-before-wait race without changing turn ordering.
+    std::unique_lock<std::mutex> lock(State.multiplayerTurnMutex);
+    State.multiplayerTurnChanged.wait_for(lock, std::chrono::milliseconds(1));
+}
+
 void BeginMultiplayerFrame()
 {
     State.multiplayerDoneMask.store(0, std::memory_order_release);
     State.multiplayerTurn.store(State.slots.empty() ? -1 : 0, std::memory_order_release);
     State.multiplayerFrameActive.store(!State.slots.empty(), std::memory_order_release);
+    NotifyMultiplayerProgress();
 }
 
 void CompleteMultiplayerFrame(int player)
@@ -139,6 +158,7 @@ void CompleteMultiplayerFrame(int player)
             NextMultiplayerTurn(player, doneMask),
             std::memory_order_acq_rel);
     }
+    NotifyMultiplayerProgress();
 }
 
 void CancelMultiplayerFrame()
@@ -146,6 +166,7 @@ void CancelMultiplayerFrame()
     State.multiplayerFrameActive.store(false, std::memory_order_release);
     State.multiplayerDoneMask.store(0, std::memory_order_release);
     State.multiplayerTurn.store(-1, std::memory_order_release);
+    NotifyMultiplayerProgress();
 }
 
 void ApplySchedulerJitter(SlotContext& context)
@@ -611,14 +632,14 @@ bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexce
             const int next = NextMultiplayerTurn(player, doneMask);
             if (next >= 0 && next != player)
                 State.multiplayerTurn.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
-            std::this_thread::yield();
+            WaitForMultiplayerProgress();
         }
     }
 
     while (State.multiplayerFrameActive.load(std::memory_order_acquire)
         && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
         && State.multiplayerTurn.load(std::memory_order_acquire) != player)
-        std::this_thread::yield();
+        WaitForMultiplayerProgress();
 
     return State.multiplayerFrameActive.load(std::memory_order_acquire)
         && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
@@ -638,6 +659,7 @@ void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept
             expected,
             NextMultiplayerTurn(player, doneMask),
             std::memory_order_acq_rel);
+        NotifyMultiplayerProgress();
     }
 }
 
@@ -653,6 +675,7 @@ void NoteMultiplayerCommand(void* userdata) noexcept
 void NoteMultiplayerReply() noexcept
 {
     State.multiplayerReplySequence.fetch_add(1, std::memory_order_acq_rel);
+    NotifyMultiplayerProgress();
 }
 
 void SignalStopped(void* userdata) noexcept
@@ -782,7 +805,22 @@ REBIT_EXPORT int md_run_frame()
         State.completed = 0;
         ++State.generation;
         State.frameStart.notify_all();
-        State.frameComplete.wait(lock, [&] { return State.completed == static_cast<int>(State.slots.size()) || State.shuttingDown; });
+        const auto completed = [&] {
+            return State.completed == static_cast<int>(State.slots.size()) || State.shuttingDown;
+        };
+        if (!State.frameComplete.wait_for(lock, MultiplayerFrameWatchdog, completed))
+        {
+            // Never strand the browser on a starved LocalMP turn. Cancelling
+            // only the per-frame turn barrier lets both consoles finish; the
+            // periodic cross-peer hash and checkpoint protocol repair any
+            // state divergence caused by this emergency path.
+            CancelMultiplayerFrame();
+            if (!State.frameComplete.wait_for(lock, MultiplayerRecoveryWatchdog, completed))
+            {
+                State.error = "NDS Local Wireless console workers did not finish a synchronized frame.";
+                return 0;
+            }
+        }
     }
 
     if (auto* visible = GetSlot(State.visiblePlayer))
