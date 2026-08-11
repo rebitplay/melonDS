@@ -40,21 +40,23 @@ target_include_directories(melonds_dual PRIVATE
 )
 
 target_link_libraries(melonds_dual PRIVATE core Threads::Threads)
+set_property(TARGET melonds_dual PROPERTY CXX_STANDARD 20)
 target_compile_definitions(melonds_dual PRIVATE REBIT_MELONDS_DUAL_BUILD="melonds-dual-4")
 
 if(EMSCRIPTEN)
-    target_compile_options(core PUBLIC "-pthread")
-    target_compile_options(teakra PUBLIC "-pthread")
-    target_compile_options(melonds_dual PRIVATE "-pthread")
+    target_compile_options(core PUBLIC "-pthread" "-msimd128")
+    target_compile_options(teakra PUBLIC "-pthread" "-msimd128")
+    target_compile_options(melonds_dual PRIVATE "-pthread" "-msimd128")
 
     target_link_options(melonds_dual PRIVATE
         "--no-entry"
         "-pthread"
+        "-msimd128"
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=createMelondsDualModule"
         "-sENVIRONMENT=worker,node"
         "-sALLOW_MEMORY_GROWTH=1"
-        "-sINITIAL_MEMORY=268435456"
+        "-sINITIAL_MEMORY=335544320"
         "-sMAXIMUM_MEMORY=1073741824"
         "-sPTHREAD_POOL_SIZE=4"
         "-sSTACK_SIZE=2097152"

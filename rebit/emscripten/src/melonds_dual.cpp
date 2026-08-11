@@ -49,6 +49,7 @@ constexpr int AudioScratchFrames = 4096;
 // LocalMP calls are cooperatively ordered below, so receive operations must
 // never make correctness depend on a host scheduler or wall-clock timeout.
 constexpr int LocalMultiplayerReceiveTimeoutMs = 0;
+constexpr int MultiplayerProgressSpinYields = 8;
 constexpr auto MultiplayerFrameWatchdog = std::chrono::seconds(2);
 constexpr auto MultiplayerRecoveryWatchdog = std::chrono::seconds(5);
 constexpr std::uint32_t CheckpointMagic = 0x53444E52; // "RNDS" in little endian.
@@ -90,8 +91,7 @@ struct Runtime
     std::atomic<std::uint32_t> multiplayerDoneMask {0};
     std::atomic<std::uint64_t> multiplayerReplySequence {0};
     std::atomic<int> multiplayerTurn {-1};
-    std::mutex multiplayerTurnMutex;
-    std::condition_variable multiplayerTurnChanged;
+    std::atomic<std::uint32_t> multiplayerProgressSequence {0};
     int visiblePlayer = 0;
     bool shuttingDown = false;
     std::atomic<bool> multiplayerFrameActive {false};
@@ -116,16 +116,24 @@ int NextMultiplayerTurn(int current, std::uint32_t doneMask)
 
 void NotifyMultiplayerProgress()
 {
-    State.multiplayerTurnChanged.notify_all();
+    State.multiplayerProgressSequence.fetch_add(1, std::memory_order_release);
+    State.multiplayerProgressSequence.notify_all();
 }
 
-void WaitForMultiplayerProgress()
+void WaitForMultiplayerProgress(std::uint32_t observedSequence)
 {
-    // A bounded condition wait avoids burning one browser worker per console
-    // while another console owns the deterministic LocalMP turn. The timeout
-    // closes the notify-before-wait race without changing turn ordering.
-    std::unique_lock<std::mutex> lock(State.multiplayerTurnMutex);
-    State.multiplayerTurnChanged.wait_for(lock, std::chrono::milliseconds(1));
+    // Most LocalMP turns are handed off within a few scheduler yields. Keep
+    // that fast path lock-free, but bound it so a delayed browser worker
+    // always falls back to the lossless sequence wait below.
+    for (int attempt = 0; attempt < MultiplayerProgressSpinYields; ++attempt)
+    {
+        if (State.multiplayerProgressSequence.load(std::memory_order_acquire) != observedSequence)
+            return;
+        std::this_thread::yield();
+    }
+    // C++20 atomic wait closes the notify-before-wait race without a mutex or
+    // a fixed wall-clock delay. It also maps directly to the browser futex.
+    State.multiplayerProgressSequence.wait(observedSequence, std::memory_order_acquire);
 }
 
 void BeginMultiplayerFrame()
@@ -627,19 +635,32 @@ bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexce
             && State.multiplayerReplySequence.load(std::memory_order_acquire) <= baseline
             && (State.multiplayerDoneMask.load(std::memory_order_acquire) & otherPlayersMask) != otherPlayersMask)
         {
+            const std::uint32_t observedSequence = State.multiplayerProgressSequence.load(std::memory_order_acquire);
             int expected = player;
             const std::uint32_t doneMask = State.multiplayerDoneMask.load(std::memory_order_acquire);
             const int next = NextMultiplayerTurn(player, doneMask);
             if (next >= 0 && next != player)
-                State.multiplayerTurn.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
-            WaitForMultiplayerProgress();
+            {
+                if (State.multiplayerTurn.compare_exchange_strong(expected, next, std::memory_order_acq_rel))
+                    NotifyMultiplayerProgress();
+            }
+            if (State.multiplayerFrameActive.load(std::memory_order_acquire)
+                && State.multiplayerReplySequence.load(std::memory_order_acquire) <= baseline
+                && (State.multiplayerDoneMask.load(std::memory_order_acquire) & otherPlayersMask) != otherPlayersMask)
+                WaitForMultiplayerProgress(observedSequence);
         }
     }
 
     while (State.multiplayerFrameActive.load(std::memory_order_acquire)
         && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
         && State.multiplayerTurn.load(std::memory_order_acquire) != player)
-        WaitForMultiplayerProgress();
+    {
+        const std::uint32_t observedSequence = State.multiplayerProgressSequence.load(std::memory_order_acquire);
+        if (State.multiplayerFrameActive.load(std::memory_order_acquire)
+            && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
+            && State.multiplayerTurn.load(std::memory_order_acquire) != player)
+            WaitForMultiplayerProgress(observedSequence);
+    }
 
     return State.multiplayerFrameActive.load(std::memory_order_acquire)
         && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
