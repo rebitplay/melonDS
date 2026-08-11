@@ -16,7 +16,11 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <algorithm>
 #include <cstring>
+#include <array>
+#include <limits>
+#include <vector>
 
 #include "LocalMP.h"
 
@@ -28,6 +32,59 @@ using Platform::LogLevel;
 
 namespace melonDS
 {
+
+namespace
+{
+
+constexpr u32 LocalMPStateMagic = 0x504D4252; // "RBMP" in little endian.
+constexpr u32 LocalMPStateVersion = 1;
+constexpr u32 MaximumSerializedSignals = 8192;
+
+void Append16(std::vector<u8>& output, u16 value)
+{
+    output.push_back(static_cast<u8>(value));
+    output.push_back(static_cast<u8>(value >> 8));
+}
+
+void Append32(std::vector<u8>& output, u32 value)
+{
+    output.push_back(static_cast<u8>(value));
+    output.push_back(static_cast<u8>(value >> 8));
+    output.push_back(static_cast<u8>(value >> 16));
+    output.push_back(static_cast<u8>(value >> 24));
+}
+
+bool Read16(const u8*& cursor, const u8* end, u16& value)
+{
+    if (end - cursor < 2)
+        return false;
+    value = static_cast<u16>(cursor[0]) | (static_cast<u16>(cursor[1]) << 8);
+    cursor += 2;
+    return true;
+}
+
+bool Read32(const u8*& cursor, const u8* end, u32& value)
+{
+    if (end - cursor < 4)
+        return false;
+    value = static_cast<u32>(cursor[0])
+        | (static_cast<u32>(cursor[1]) << 8)
+        | (static_cast<u32>(cursor[2]) << 16)
+        | (static_cast<u32>(cursor[3]) << 24);
+    cursor += 4;
+    return true;
+}
+
+bool ReadBytes(const u8*& cursor, const u8* end, void* destination, std::size_t length)
+{
+    if (length > static_cast<std::size_t>(end - cursor))
+        return false;
+    std::memcpy(destination, cursor, length);
+    cursor += length;
+    return true;
+}
+
+}
 
 LocalMP::LocalMP() noexcept :
     MPQueueLock(Mutex_Create())
@@ -68,6 +125,8 @@ void LocalMP::Begin(int inst)
     ReplyReadOffset[inst] = MPStatus.ReplyWriteOffset;
     Semaphore_Reset(SemPool[inst]);
     Semaphore_Reset(SemPool[16 + inst]);
+    PacketSignalCount[inst] = 0;
+    ReplySignalCount[inst] = 0;
     MPStatus.ConnectedBitmask |= (1 << inst);
     Mutex_Unlock(MPQueueLock);
 }
@@ -184,17 +243,32 @@ int LocalMP::SendPacketGeneric(int inst, u32 type, u8* packet, int len, u64 time
         MPStatus.MPReplyBitmask = 0;
         ReplyReadOffset[inst] = MPStatus.ReplyWriteOffset;
         Semaphore_Reset(SemPool[16 + inst]);
+        ReplySignalCount[inst] = 0;
     }
     else if (type == 2)
     {
         MPStatus.MPReplyBitmask |= (1 << inst);
     }
 
+    const int replyHost = MPStatus.MPHostinst;
+    if (type == 2)
+    {
+        if (replyHost >= 0 && replyHost < 16)
+            ++ReplySignalCount[replyHost];
+    }
+    else
+    {
+        for (int i = 0; i < 16; ++i)
+            if (mask & (1 << i))
+                ++PacketSignalCount[i];
+    }
+
     Mutex_Unlock(MPQueueLock);
 
     if (type == 2)
     {
-        Semaphore_Post(SemPool[16 +  MPStatus.MPHostinst]);
+        if (replyHost >= 0 && replyHost < 16)
+            Semaphore_Post(SemPool[16 + replyHost]);
     }
     else
     {
@@ -219,6 +293,9 @@ int LocalMP::RecvPacketGeneric(int inst, u8* packet, bool block, u64* timestamp)
 
         Mutex_Lock(MPQueueLock);
 
+        if (PacketSignalCount[inst] > 0)
+            --PacketSignalCount[inst];
+
         MPPacketHeader pktheader = {};
         FIFORead(inst, 0, &pktheader, sizeof(pktheader));
 
@@ -227,6 +304,7 @@ int LocalMP::RecvPacketGeneric(int inst, u8* packet, bool block, u64* timestamp)
             Log(LogLevel::Warn, "PACKET FIFO OVERFLOW\n");
             PacketReadOffset[inst] = MPStatus.PacketWriteOffset;
             Semaphore_Reset(SemPool[inst]);
+            PacketSignalCount[inst] = 0;
             Mutex_Unlock(MPQueueLock);
             return 0;
         }
@@ -318,6 +396,9 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
 
         Mutex_Lock(MPQueueLock);
 
+        if (ReplySignalCount[inst] > 0)
+            --ReplySignalCount[inst];
+
         MPPacketHeader pktheader = {};
         FIFORead(inst, 1, &pktheader, sizeof(pktheader));
 
@@ -326,6 +407,7 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
             Log(LogLevel::Warn, "REPLY FIFO OVERFLOW\n");
             ReplyReadOffset[inst] = MPStatus.ReplyWriteOffset;
             Semaphore_Reset(SemPool[16 + inst]);
+            ReplySignalCount[inst] = 0;
             Mutex_Unlock(MPQueueLock);
             return 0;
         }
@@ -363,5 +445,101 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
     }
 }
 
+std::vector<u8> LocalMP::SerializeState()
+{
+    std::vector<u8> output;
+    output.reserve(8 + 18 + (16 * 4 * 4) + kPacketQueueSize + kReplyQueueSize);
+
+    Mutex_Lock(MPQueueLock);
+    Append32(output, LocalMPStateMagic);
+    Append32(output, LocalMPStateVersion);
+    Append16(output, MPStatus.ConnectedBitmask);
+    Append32(output, MPStatus.PacketWriteOffset);
+    Append32(output, MPStatus.ReplyWriteOffset);
+    Append16(output, MPStatus.MPHostinst);
+    Append16(output, MPStatus.MPReplyBitmask);
+    Append32(output, static_cast<u32>(LastHostID));
+    for (u32 value : PacketReadOffset) Append32(output, value);
+    for (u32 value : ReplyReadOffset) Append32(output, value);
+    for (u32 value : PacketSignalCount) Append32(output, value);
+    for (u32 value : ReplySignalCount) Append32(output, value);
+    output.insert(output.end(), MPPacketQueue, MPPacketQueue + kPacketQueueSize);
+    output.insert(output.end(), MPReplyQueue, MPReplyQueue + kReplyQueueSize);
+    Mutex_Unlock(MPQueueLock);
+
+    return output;
 }
 
+bool LocalMP::DeserializeState(const u8* data, std::size_t length)
+{
+    if (!data || length > static_cast<std::size_t>(std::numeric_limits<u32>::max()))
+        return false;
+
+    const u8* cursor = data;
+    const u8* end = data + length;
+    u32 magic = 0;
+    u32 version = 0;
+    MPStatusData status {};
+    u32 lastHost = 0;
+    std::array<u32, 16> packetRead {};
+    std::array<u32, 16> replyRead {};
+    std::array<u32, 16> packetSignals {};
+    std::array<u32, 16> replySignals {};
+    std::array<u8, kPacketQueueSize> packetQueue {};
+    std::array<u8, kReplyQueueSize> replyQueue {};
+
+    if (!Read32(cursor, end, magic)
+        || !Read32(cursor, end, version)
+        || !Read16(cursor, end, status.ConnectedBitmask)
+        || !Read32(cursor, end, status.PacketWriteOffset)
+        || !Read32(cursor, end, status.ReplyWriteOffset)
+        || !Read16(cursor, end, status.MPHostinst)
+        || !Read16(cursor, end, status.MPReplyBitmask)
+        || !Read32(cursor, end, lastHost))
+        return false;
+    for (u32& value : packetRead) if (!Read32(cursor, end, value)) return false;
+    for (u32& value : replyRead) if (!Read32(cursor, end, value)) return false;
+    for (u32& value : packetSignals) if (!Read32(cursor, end, value)) return false;
+    for (u32& value : replySignals) if (!Read32(cursor, end, value)) return false;
+    if (!ReadBytes(cursor, end, packetQueue.data(), packetQueue.size())
+        || !ReadBytes(cursor, end, replyQueue.data(), replyQueue.size())
+        || cursor != end
+        || magic != LocalMPStateMagic
+        || version != LocalMPStateVersion
+        || status.PacketWriteOffset >= kPacketQueueSize
+        || status.ReplyWriteOffset >= kReplyQueueSize
+        || status.MPHostinst >= 16
+        || (lastHost != std::numeric_limits<u32>::max() && lastHost >= 16))
+        return false;
+    for (int index = 0; index < 16; ++index)
+    {
+        if (packetRead[index] >= kPacketQueueSize
+            || replyRead[index] >= kReplyQueueSize
+            || packetSignals[index] > MaximumSerializedSignals
+            || replySignals[index] > MaximumSerializedSignals)
+            return false;
+    }
+
+    Mutex_Lock(MPQueueLock);
+    MPStatus = status;
+    LastHostID = lastHost == std::numeric_limits<u32>::max() ? -1 : static_cast<int>(lastHost);
+    std::copy(packetRead.begin(), packetRead.end(), PacketReadOffset);
+    std::copy(replyRead.begin(), replyRead.end(), ReplyReadOffset);
+    std::copy(packetSignals.begin(), packetSignals.end(), PacketSignalCount);
+    std::copy(replySignals.begin(), replySignals.end(), ReplySignalCount);
+    std::copy(packetQueue.begin(), packetQueue.end(), MPPacketQueue);
+    std::copy(replyQueue.begin(), replyQueue.end(), MPReplyQueue);
+    for (int index = 0; index < 16; ++index)
+    {
+        Semaphore_Reset(SemPool[index]);
+        Semaphore_Reset(SemPool[16 + index]);
+        for (u32 signal = 0; signal < PacketSignalCount[index]; ++signal)
+            Semaphore_Post(SemPool[index]);
+        for (u32 signal = 0; signal < ReplySignalCount[index]; ++signal)
+            Semaphore_Post(SemPool[16 + index]);
+    }
+    Mutex_Unlock(MPQueueLock);
+    return true;
+}
+
+}

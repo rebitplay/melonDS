@@ -23,6 +23,9 @@
 #include "Platform.h"
 #include "MPInterface.h"
 
+#include <cstddef>
+#include <vector>
+
 namespace melonDS
 {
 struct MPStatusData
@@ -61,6 +64,9 @@ public:
     int RecvHostPacket(int inst, u8* data, u64* timestamp);
     u16 RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask);
 
+    std::vector<u8> SerializeState();
+    bool DeserializeState(const u8* data, std::size_t length);
+
 private:
     void FIFORead(int inst, int fifo, void* buf, int len) noexcept;
     void FIFOWrite(int inst, int fifo, void* buf, int len) noexcept;
@@ -73,6 +79,8 @@ private:
     u8 MPReplyQueue[kReplyQueueSize] {};
     u32 PacketReadOffset[16] {};
     u32 ReplyReadOffset[16] {};
+    u32 PacketSignalCount[16] {};
+    u32 ReplySignalCount[16] {};
 
     int LastHostID = -1;
     Platform::Semaphore* SemPool[32] {};

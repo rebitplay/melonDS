@@ -5,6 +5,7 @@
 #include "LocalMP.h"
 #include "NDS.h"
 #include "NDSCart.h"
+#include "Savestate.h"
 #include "SPI_Firmware.h"
 
 #include <algorithm>
@@ -15,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,6 +49,11 @@ constexpr int AudioScratchFrames = 4096;
 // LocalMP calls are cooperatively ordered below, so receive operations must
 // never make correctness depend on a host scheduler or wall-clock timeout.
 constexpr int LocalMultiplayerReceiveTimeoutMs = 0;
+constexpr std::uint32_t CheckpointMagic = 0x53444E52; // "RNDS" in little endian.
+constexpr std::uint32_t CheckpointVersion = 2;
+constexpr std::uint32_t MaximumConsoleStateBytes = 64 * 1024 * 1024;
+constexpr std::uint32_t MaximumMultiplayerStateBytes = 1024 * 1024;
+constexpr std::uint32_t MaximumCheckpointBytes = MaximumPlayers * MaximumConsoleStateBytes + MaximumMultiplayerStateBytes;
 
 struct InputState
 {
@@ -74,6 +81,7 @@ struct Runtime
     std::vector<std::unique_ptr<Slot>> slots;
     std::unique_ptr<melonDS::LocalMP> multiplayer;
     std::array<std::int16_t, AudioScratchFrames * 2> audio {};
+    std::vector<std::uint8_t> checkpoint;
     std::string error;
     std::uint64_t generation = 0;
     int completed = 0;
@@ -83,6 +91,7 @@ struct Runtime
     int visiblePlayer = 0;
     bool shuttingDown = false;
     std::atomic<bool> multiplayerFrameActive {false};
+    std::atomic<std::uint32_t> schedulerJitterProfile {0};
     bool loaded = false;
     double lastFrameMs = 0.0;
 };
@@ -94,7 +103,7 @@ int NextMultiplayerTurn(int current, std::uint32_t doneMask)
     const int players = static_cast<int>(State.slots.size());
     for (int offset = 1; offset <= players; ++offset)
     {
-        const int candidate = (current + offset) % players;
+        const int candidate = (current + offset + players) % players;
         if ((doneMask & (1U << candidate)) == 0)
             return candidate;
     }
@@ -114,7 +123,8 @@ void CompleteMultiplayerFrame(int player)
         || player < 0
         || player >= static_cast<int>(State.slots.size()))
         return;
-    const std::uint32_t doneMask = State.multiplayerDoneMask.fetch_or(1U << player, std::memory_order_acq_rel) | (1U << player);
+    const std::uint32_t doneMask = State.multiplayerDoneMask.fetch_or(1U << player, std::memory_order_acq_rel)
+        | (1U << player);
     const std::uint32_t allDoneMask = (1U << State.slots.size()) - 1U;
     if (doneMask == allDoneMask)
     {
@@ -123,7 +133,11 @@ void CompleteMultiplayerFrame(int player)
     }
     else if (State.multiplayerTurn.load(std::memory_order_acquire) == player)
     {
-        State.multiplayerTurn.store(NextMultiplayerTurn(player, doneMask), std::memory_order_release);
+        int expected = player;
+        State.multiplayerTurn.compare_exchange_strong(
+            expected,
+            NextMultiplayerTurn(player, doneMask),
+            std::memory_order_acq_rel);
     }
 }
 
@@ -132,6 +146,19 @@ void CancelMultiplayerFrame()
     State.multiplayerFrameActive.store(false, std::memory_order_release);
     State.multiplayerDoneMask.store(0, std::memory_order_release);
     State.multiplayerTurn.store(-1, std::memory_order_release);
+}
+
+void ApplySchedulerJitter(SlotContext& context)
+{
+    const std::uint32_t profile = State.schedulerJitterProfile.load(std::memory_order_relaxed);
+    if (profile == 0)
+        return;
+    const std::uint64_t call = context.multiplayerCalls.fetch_add(1, std::memory_order_relaxed);
+    std::uint32_t value = profile ^ (static_cast<std::uint32_t>(context.id) * 0x9E3779B9U)
+        ^ (static_cast<std::uint32_t>(call) * 0x85EBCA6BU);
+    value ^= value >> 16;
+    for (std::uint32_t iteration = 0; iteration < (value & 0x3FU); ++iteration)
+        std::this_thread::yield();
 }
 
 std::uint64_t Fnv1a(const void* data, std::size_t size, std::uint64_t hash = 1469598103934665603ULL)
@@ -143,6 +170,265 @@ std::uint64_t Fnv1a(const void* data, std::size_t size, std::uint64_t hash = 146
         hash *= 1099511628211ULL;
     }
     return hash;
+}
+
+void Append32(std::vector<std::uint8_t>& output, std::uint32_t value)
+{
+    output.push_back(static_cast<std::uint8_t>(value));
+    output.push_back(static_cast<std::uint8_t>(value >> 8));
+    output.push_back(static_cast<std::uint8_t>(value >> 16));
+    output.push_back(static_cast<std::uint8_t>(value >> 24));
+}
+
+void Append64(std::vector<std::uint8_t>& output, std::uint64_t value)
+{
+    Append32(output, static_cast<std::uint32_t>(value));
+    Append32(output, static_cast<std::uint32_t>(value >> 32));
+}
+
+bool Read32(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint32_t& value)
+{
+    if (end - cursor < 4)
+        return false;
+    value = static_cast<std::uint32_t>(cursor[0])
+        | (static_cast<std::uint32_t>(cursor[1]) << 8)
+        | (static_cast<std::uint32_t>(cursor[2]) << 16)
+        | (static_cast<std::uint32_t>(cursor[3]) << 24);
+    cursor += 4;
+    return true;
+}
+
+bool Read64(const std::uint8_t*& cursor, const std::uint8_t* end, std::uint64_t& value)
+{
+    std::uint32_t low = 0;
+    std::uint32_t high = 0;
+    if (!Read32(cursor, end, low) || !Read32(cursor, end, high))
+        return false;
+    value = static_cast<std::uint64_t>(low) | (static_cast<std::uint64_t>(high) << 32);
+    return true;
+}
+
+bool ReadSlice(
+    const std::uint8_t*& cursor,
+    const std::uint8_t* end,
+    std::uint32_t maximumLength,
+    const std::uint8_t*& data,
+    std::uint32_t& length)
+{
+    if (!Read32(cursor, end, length)
+        || length > maximumLength
+        || length > static_cast<std::uint32_t>(end - cursor))
+        return false;
+    data = cursor;
+    cursor += length;
+    return true;
+}
+
+struct CheckpointSlot
+{
+    InputState input;
+    std::array<std::uint64_t, 5> counters {};
+    std::uint64_t replyBaseline = 0;
+    bool awaitingReplies = false;
+    const std::uint8_t* state = nullptr;
+    std::uint32_t stateLength = 0;
+};
+
+void CopyFramebuffer(Slot& slot);
+
+bool RuntimeAtCheckpointBoundary()
+{
+    return !State.multiplayerFrameActive.load(std::memory_order_acquire)
+        && State.multiplayerTurn.load(std::memory_order_acquire) < 0;
+}
+
+bool ExportCheckpoint()
+{
+    State.error.clear();
+    if (!State.loaded || State.slots.empty() || !State.multiplayer || !RuntimeAtCheckpointBoundary())
+    {
+        State.error = "NDS Local Wireless checkpoint requested outside a completed frame.";
+        return false;
+    }
+
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    const std::uint32_t frame = State.slots.front()->console->NumFrames;
+    for (const auto& slot : State.slots)
+    {
+        if (!slot->console || slot->console->NumFrames != frame)
+        {
+            State.error = "NDS Local Wireless consoles are not at the same checkpoint frame.";
+            return false;
+        }
+    }
+
+    std::vector<std::uint8_t> checkpoint;
+    checkpoint.reserve(32 * 1024 * 1024);
+    Append32(checkpoint, CheckpointMagic);
+    Append32(checkpoint, CheckpointVersion);
+    Append32(checkpoint, static_cast<std::uint32_t>(State.slots.size()));
+    Append32(checkpoint, frame);
+    Append64(checkpoint, State.multiplayerReplySequence.load(std::memory_order_acquire));
+    for (const auto& slot : State.slots)
+    {
+        Append32(checkpoint, slot->input.keys);
+        Append32(checkpoint, slot->input.touching ? 1U : 0U);
+        Append32(checkpoint, slot->input.touchX);
+        Append32(checkpoint, slot->input.touchY);
+        Append64(checkpoint, slot->context.packetsSent.load(std::memory_order_relaxed));
+        Append64(checkpoint, slot->context.packetsReceived.load(std::memory_order_relaxed));
+        Append64(checkpoint, slot->context.commands.load(std::memory_order_relaxed));
+        Append64(checkpoint, slot->context.replies.load(std::memory_order_relaxed));
+        Append64(checkpoint, slot->context.multiplayerCalls.load(std::memory_order_relaxed));
+        Append64(checkpoint, slot->context.replyBaseline.load(std::memory_order_relaxed));
+        Append32(checkpoint, slot->context.awaitingReplies.load(std::memory_order_relaxed) ? 1U : 0U);
+
+        melonDS::Savestate state;
+        if (state.Error || !slot->console->DoSavestate(&state) || state.Error || state.Length() > MaximumConsoleStateBytes)
+        {
+            State.error = "Could not serialize a Nintendo DS checkpoint.";
+            return false;
+        }
+        Append32(checkpoint, state.Length());
+        const auto* stateBytes = static_cast<const std::uint8_t*>(state.Buffer());
+        checkpoint.insert(checkpoint.end(), stateBytes, stateBytes + state.Length());
+    }
+
+    const std::vector<std::uint8_t> multiplayer = State.multiplayer->SerializeState();
+    if (multiplayer.empty() || multiplayer.size() > MaximumMultiplayerStateBytes)
+    {
+        State.error = "Could not serialize the NDS Local Wireless radio checkpoint.";
+        return false;
+    }
+    Append32(checkpoint, static_cast<std::uint32_t>(multiplayer.size()));
+    checkpoint.insert(checkpoint.end(), multiplayer.begin(), multiplayer.end());
+    if (checkpoint.size() > MaximumCheckpointBytes)
+    {
+        State.error = "NDS Local Wireless checkpoint exceeded its safety limit.";
+        return false;
+    }
+
+    State.checkpoint = std::move(checkpoint);
+    return true;
+}
+
+bool ImportCheckpoint(std::uint8_t* data, std::uint32_t length)
+{
+    State.error.clear();
+    if (!State.loaded
+        || !data
+        || length < 20
+        || length > MaximumCheckpointBytes
+        || !State.multiplayer
+        || !RuntimeAtCheckpointBoundary())
+    {
+        State.error = "NDS Local Wireless checkpoint is unavailable or unsafe to import.";
+        return false;
+    }
+
+    const std::uint8_t* cursor = data;
+    const std::uint8_t* end = data + length;
+    std::uint32_t magic = 0;
+    std::uint32_t version = 0;
+    std::uint32_t players = 0;
+    std::uint32_t frame = 0;
+    std::uint64_t replySequence = 0;
+    if (!Read32(cursor, end, magic)
+        || !Read32(cursor, end, version)
+        || !Read32(cursor, end, players)
+        || !Read32(cursor, end, frame)
+        || !Read64(cursor, end, replySequence)
+        || magic != CheckpointMagic
+        || version != CheckpointVersion
+        || players != State.slots.size())
+    {
+        State.error = "NDS Local Wireless checkpoint header does not match this runtime.";
+        return false;
+    }
+
+    std::array<CheckpointSlot, MaximumPlayers> slots {};
+    for (std::uint32_t player = 0; player < players; ++player)
+    {
+        std::uint32_t touching = 0;
+        std::uint32_t touchX = 0;
+        std::uint32_t touchY = 0;
+        if (!Read32(cursor, end, slots[player].input.keys)
+            || !Read32(cursor, end, touching)
+            || !Read32(cursor, end, touchX)
+            || !Read32(cursor, end, touchY)
+            || touching > 1
+            || touchX > 255
+            || touchY > 191)
+        {
+            State.error = "NDS Local Wireless checkpoint input state is invalid.";
+            return false;
+        }
+        slots[player].input.touching = touching != 0;
+        slots[player].input.touchX = static_cast<std::uint16_t>(touchX);
+        slots[player].input.touchY = static_cast<std::uint16_t>(touchY);
+        for (std::uint64_t& counter : slots[player].counters)
+        {
+            if (!Read64(cursor, end, counter))
+            {
+                State.error = "NDS Local Wireless checkpoint counters are truncated.";
+                return false;
+            }
+        }
+        std::uint32_t awaitingReplies = 0;
+        if (!Read64(cursor, end, slots[player].replyBaseline)
+            || !Read32(cursor, end, awaitingReplies)
+            || awaitingReplies > 1)
+        {
+            State.error = "NDS Local Wireless checkpoint reply state is invalid.";
+            return false;
+        }
+        slots[player].awaitingReplies = awaitingReplies != 0;
+        if (!ReadSlice(cursor, end, MaximumConsoleStateBytes, slots[player].state, slots[player].stateLength))
+        {
+            State.error = "NDS Local Wireless console checkpoint is invalid.";
+            return false;
+        }
+    }
+
+    const std::uint8_t* multiplayer = nullptr;
+    std::uint32_t multiplayerLength = 0;
+    if (!ReadSlice(cursor, end, MaximumMultiplayerStateBytes, multiplayer, multiplayerLength) || cursor != end)
+    {
+        State.error = "NDS Local Wireless radio checkpoint is invalid.";
+        return false;
+    }
+
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    for (std::uint32_t player = 0; player < players; ++player)
+    {
+        melonDS::Savestate state(const_cast<std::uint8_t*>(slots[player].state), slots[player].stateLength, false);
+        if (state.Error || !State.slots[player]->console->DoSavestate(&state) || state.Error
+            || State.slots[player]->console->NumFrames != frame)
+        {
+            State.error = "Could not restore a Nintendo DS checkpoint.";
+            return false;
+        }
+    }
+    if (!State.multiplayer->DeserializeState(multiplayer, multiplayerLength))
+    {
+        State.error = "Could not restore the NDS Local Wireless radio checkpoint.";
+        return false;
+    }
+    for (std::uint32_t player = 0; player < players; ++player)
+    {
+        auto& slot = *State.slots[player];
+        slot.input = slots[player].input;
+        slot.context.packetsSent.store(slots[player].counters[0], std::memory_order_relaxed);
+        slot.context.packetsReceived.store(slots[player].counters[1], std::memory_order_relaxed);
+        slot.context.commands.store(slots[player].counters[2], std::memory_order_relaxed);
+        slot.context.replies.store(slots[player].counters[3], std::memory_order_relaxed);
+        slot.context.multiplayerCalls.store(slots[player].counters[4], std::memory_order_relaxed);
+        slot.context.replyBaseline.store(slots[player].replyBaseline, std::memory_order_relaxed);
+        slot.context.awaitingReplies.store(slots[player].awaitingReplies, std::memory_order_relaxed);
+        CopyFramebuffer(slot);
+    }
+    State.multiplayerReplySequence.store(replySequence, std::memory_order_release);
+    return true;
 }
 
 void CopyFramebuffer(Slot& slot)
@@ -221,12 +507,14 @@ void StopRuntime()
 
     State.slots.clear();
     State.multiplayer.reset();
+    State.checkpoint.clear();
     State.visiblePlayer = 0;
     State.generation = 0;
     State.completed = 0;
-    State.multiplayerTurn.store(-1, std::memory_order_release);
     State.shuttingDown = false;
-    State.multiplayerFrameActive.store(false, std::memory_order_release);
+    State.multiplayerTurn.store(-1, std::memory_order_release);
+    State.multiplayerReplySequence.store(0, std::memory_order_release);
+    State.schedulerJitterProfile.store(0, std::memory_order_relaxed);
     State.loaded = false;
     State.lastFrameMs = 0.0;
 }
@@ -299,12 +587,34 @@ melonDS::LocalMP* LocalMultiplayer() noexcept
     return State.multiplayer.get();
 }
 
-bool EnterMultiplayerTurn(void* userdata) noexcept
+bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexcept
 {
+    auto* context = Context(userdata);
     const int player = InstanceId(userdata);
-    if (player < 0 || player >= static_cast<int>(State.slots.size()))
+    if (!context || player < 0 || player >= static_cast<int>(State.slots.size()))
         return false;
+    ApplySchedulerJitter(*context);
+
     const std::uint32_t playerBit = 1U << player;
+    if (operation == MultiplayerOperation::RecvReplies
+        && context->awaitingReplies.exchange(false, std::memory_order_acq_rel))
+    {
+        const std::uint64_t baseline = context->replyBaseline.load(std::memory_order_acquire);
+        const std::uint32_t allPlayersMask = (1U << State.slots.size()) - 1U;
+        const std::uint32_t otherPlayersMask = allPlayersMask & ~playerBit;
+        while (State.multiplayerFrameActive.load(std::memory_order_acquire)
+            && State.multiplayerReplySequence.load(std::memory_order_acquire) <= baseline
+            && (State.multiplayerDoneMask.load(std::memory_order_acquire) & otherPlayersMask) != otherPlayersMask)
+        {
+            int expected = player;
+            const std::uint32_t doneMask = State.multiplayerDoneMask.load(std::memory_order_acquire);
+            const int next = NextMultiplayerTurn(player, doneMask);
+            if (next >= 0 && next != player)
+                State.multiplayerTurn.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
+            std::this_thread::yield();
+        }
+    }
+
     while (State.multiplayerFrameActive.load(std::memory_order_acquire)
         && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
         && State.multiplayerTurn.load(std::memory_order_acquire) != player)
@@ -320,56 +630,29 @@ void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept
     if (!scheduled)
         return;
     const int player = InstanceId(userdata);
-    if (State.multiplayerFrameActive.load(std::memory_order_acquire)
-        && State.multiplayerTurn.load(std::memory_order_acquire) == player)
+    if (player >= 0 && player < static_cast<int>(State.slots.size()))
     {
-        const int next = NextMultiplayerTurn(player, State.multiplayerDoneMask.load(std::memory_order_acquire));
-        if (next >= 0)
-            State.multiplayerTurn.store(next, std::memory_order_release);
+        int expected = player;
+        const std::uint32_t doneMask = State.multiplayerDoneMask.load(std::memory_order_acquire);
+        State.multiplayerTurn.compare_exchange_strong(
+            expected,
+            NextMultiplayerTurn(player, doneMask),
+            std::memory_order_acq_rel);
     }
 }
 
 void NoteMultiplayerCommand(void* userdata) noexcept
 {
-    if (auto* context = Context(userdata))
-    {
-        context->replyBaseline.store(State.multiplayerReplySequence.load(std::memory_order_acquire), std::memory_order_release);
-        context->awaitingReplies.store(true, std::memory_order_release);
-    }
+    auto* context = Context(userdata);
+    if (!context)
+        return;
+    context->replyBaseline.store(State.multiplayerReplySequence.load(std::memory_order_acquire), std::memory_order_release);
+    context->awaitingReplies.store(true, std::memory_order_release);
 }
 
 void NoteMultiplayerReply() noexcept
 {
     State.multiplayerReplySequence.fetch_add(1, std::memory_order_acq_rel);
-}
-
-void AwaitMultiplayerReplies(void* userdata) noexcept
-{
-    auto* context = Context(userdata);
-    const int player = InstanceId(userdata);
-    if (!context
-        || !context->awaitingReplies.exchange(false, std::memory_order_acq_rel)
-        || player < 0
-        || player >= static_cast<int>(State.slots.size())
-        || !State.multiplayerFrameActive.load(std::memory_order_acquire))
-        return;
-
-    const std::uint64_t baseline = context->replyBaseline.load(std::memory_order_acquire);
-    const std::uint32_t playerBit = 1U << player;
-    const std::uint32_t allPlayersMask = (1U << State.slots.size()) - 1U;
-    const std::uint32_t otherPlayersMask = allPlayersMask & ~playerBit;
-    while (State.multiplayerFrameActive.load(std::memory_order_acquire)
-        && State.multiplayerReplySequence.load(std::memory_order_acquire) <= baseline
-        && (State.multiplayerDoneMask.load(std::memory_order_acquire) & otherPlayersMask) != otherPlayersMask)
-    {
-        if (State.multiplayerTurn.load(std::memory_order_acquire) == player)
-        {
-            const int next = NextMultiplayerTurn(player, State.multiplayerDoneMask.load(std::memory_order_acquire));
-            if (next >= 0 && next != player)
-                State.multiplayerTurn.store(next, std::memory_order_release);
-        }
-        std::this_thread::yield();
-    }
 }
 
 void SignalStopped(void* userdata) noexcept
@@ -572,6 +855,49 @@ REBIT_EXPORT int md_import_save(int player, const std::uint8_t* data, std::uint3
 
     slot->console->SetNDSSave(data, length);
     slot->context.latestSave.assign(data, data + length);
+    return 1;
+}
+
+REBIT_EXPORT int md_export_checkpoint()
+{
+    return rebit::ExportCheckpoint() ? 1 : 0;
+}
+
+REBIT_EXPORT std::uint32_t md_checkpoint_size()
+{
+    return static_cast<std::uint32_t>(rebit::State.checkpoint.size());
+}
+
+REBIT_EXPORT const std::uint8_t* md_checkpoint_data()
+{
+    return rebit::State.checkpoint.empty() ? nullptr : rebit::State.checkpoint.data();
+}
+
+REBIT_EXPORT void md_clear_checkpoint()
+{
+    std::vector<std::uint8_t>().swap(rebit::State.checkpoint);
+}
+
+REBIT_EXPORT int md_import_checkpoint(std::uint8_t* data, std::uint32_t length)
+{
+    return rebit::ImportCheckpoint(data, length) ? 1 : 0;
+}
+
+REBIT_EXPORT void md_set_scheduler_jitter(std::uint32_t profile)
+{
+    rebit::State.schedulerJitterProfile.store(profile, std::memory_order_relaxed);
+}
+
+REBIT_EXPORT int md_inject_desync_for_test(int player, std::uint32_t offset, std::uint32_t value)
+{
+    auto* slot = rebit::GetSlot(player);
+    if (!slot || !slot->console || value == 0 || !rebit::RuntimeAtCheckpointBoundary())
+        return 0;
+    if (offset == std::numeric_limits<std::uint32_t>::max())
+        offset = slot->console->MainRAMMask;
+    if (offset > slot->console->MainRAMMask)
+        return 0;
+    slot->console->MainRAM[offset] ^= static_cast<std::uint8_t>(value);
     return 1;
 }
 
