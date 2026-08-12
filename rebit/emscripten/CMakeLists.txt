@@ -41,7 +41,7 @@ target_include_directories(melonds_dual PRIVATE
 
 target_link_libraries(melonds_dual PRIVATE core Threads::Threads)
 set_property(TARGET melonds_dual PROPERTY CXX_STANDARD 20)
-target_compile_definitions(melonds_dual PRIVATE REBIT_MELONDS_DUAL_BUILD="melonds-dual-4")
+target_compile_definitions(melonds_dual PRIVATE REBIT_MELONDS_DUAL_BUILD="melonds-dual-5")
 
 if(EMSCRIPTEN)
     target_compile_options(core PUBLIC "-pthread" "-msimd128")

@@ -418,7 +418,11 @@ int MP_SendReply(u8* data, int length, u64 timestamp, u16 aid, void* userdata)
     }
     auto* multiplayer = rebit::LocalMultiplayer();
     const int sent = multiplayer ? multiplayer->SendReply(rebit::InstanceId(userdata), data, length, timestamp, aid) : 0;
-    if (sent > 0)
+    // A zero-length LocalMP reply is still a real reply: melonDS uses it to
+    // complete wireless handshakes such as Mario Kart DS's race-start
+    // transition. SendReply records the reply header even when there is no
+    // payload, so always wake the deterministic scheduler after the call.
+    if (multiplayer && (sent > 0 || length == 0))
         rebit::NoteMultiplayerReply();
     return sent;
 }

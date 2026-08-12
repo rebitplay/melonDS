@@ -582,7 +582,7 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
 
     melonDS::RendererSettings rendererSettings {
         .ScaleFactor = 1,
-        .Threaded = false,
+        .Threaded = true,
         .HiresCoordinates = false,
         .BetterPolygons = false,
     };
