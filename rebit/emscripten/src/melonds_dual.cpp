@@ -12,6 +12,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -70,7 +71,11 @@ struct Slot
 {
     SlotContext context;
     std::unique_ptr<melonDS::NDS> console;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    bool cooperativeFrameComplete = true;
+#else
     std::thread worker;
+#endif
     InputState input;
     std::array<std::uint32_t, ScreenWidth * CombinedHeight> framebuffer {};
     std::uint64_t observedGeneration = 0;
@@ -98,6 +103,9 @@ struct Runtime
     std::atomic<std::uint32_t> schedulerJitterProfile {0};
     bool loaded = false;
     double lastFrameMs = 0.0;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    std::uint64_t cooperativeSlices = 0;
+#endif
 };
 
 Runtime State;
@@ -122,6 +130,9 @@ void NotifyMultiplayerProgress()
 
 void WaitForMultiplayerProgress(std::uint32_t observedSequence)
 {
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    (void)observedSequence;
+#else
     // Most LocalMP turns are handed off within a few scheduler yields. Keep
     // that fast path lock-free, but bound it so a delayed browser worker
     // always falls back to the lossless sequence wait below.
@@ -134,6 +145,7 @@ void WaitForMultiplayerProgress(std::uint32_t observedSequence)
     // C++20 atomic wait closes the notify-before-wait race without a mutex or
     // a fixed wall-clock delay. It also maps directly to the browser futex.
     State.multiplayerProgressSequence.wait(observedSequence, std::memory_order_acquire);
+#endif
 }
 
 void BeginMultiplayerFrame()
@@ -186,8 +198,12 @@ void ApplySchedulerJitter(SlotContext& context)
     std::uint32_t value = profile ^ (static_cast<std::uint32_t>(context.id) * 0x9E3779B9U)
         ^ (static_cast<std::uint32_t>(call) * 0x85EBCA6BU);
     value ^= value >> 16;
+#ifndef REBIT_MELONDS_DUAL_COOPERATIVE
     for (std::uint32_t iteration = 0; iteration < (value & 0x3FU); ++iteration)
         std::this_thread::yield();
+#else
+    (void)value;
+#endif
 }
 
 std::uint64_t Fnv1a(const void* data, std::size_t size, std::uint64_t hash = 1469598103934665603ULL)
@@ -483,6 +499,57 @@ void CopyFramebuffer(Slot& slot)
     copyScreen(static_cast<const std::uint32_t*>(bottomRaw), ScreenHeight);
 }
 
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+bool RunCooperativeFrame()
+{
+    State.cooperativeSlices = 0;
+    for (auto& slot : State.slots)
+    {
+        slot->cooperativeFrameComplete = false;
+        const InputState input = slot->input;
+        slot->console->SetKeyMask(input.keys);
+        if (input.touching)
+            slot->console->TouchScreen(input.touchX, input.touchY);
+        else
+            slot->console->ReleaseScreen();
+        if (!slot->console->BeginCooperativeFrame())
+        {
+            State.error = "NDS Local Wireless cooperative console was already advancing a frame.";
+            return false;
+        }
+    }
+
+    BeginMultiplayerFrame();
+    constexpr std::uint64_t MaximumCooperativeSlicesPerFrame = 2'000'000;
+    std::size_t nextSlot = State.slots.size() > 1 ? 1 : 0;
+    while (true)
+    {
+        bool allComplete = true;
+        for (std::size_t offset = 0; offset < State.slots.size(); ++offset)
+        {
+            const std::size_t index = (nextSlot + offset) % State.slots.size();
+            auto& slot = State.slots[index];
+            if (slot->cooperativeFrameComplete)
+                continue;
+            allComplete = false;
+            slot->cooperativeFrameComplete = slot->console->RunCooperativeFrameSlice();
+            nextSlot = (index + 1) % State.slots.size();
+            ++State.cooperativeSlices;
+            if (slot->cooperativeFrameComplete)
+                CompleteMultiplayerFrame(slot->context.id);
+            if (State.cooperativeSlices > MaximumCooperativeSlicesPerFrame)
+            {
+                State.error = "NDS Local Wireless cooperative scheduler exceeded its synchronized frame budget.";
+                CancelMultiplayerFrame();
+                return false;
+            }
+            break;
+        }
+        if (allComplete)
+            return true;
+    }
+}
+#else
 void WorkerLoop(Slot* slot)
 {
     std::unique_lock<std::mutex> lock(State.frameMutex);
@@ -510,10 +577,14 @@ void WorkerLoop(Slot* slot)
             State.frameComplete.notify_one();
     }
 }
+#endif
 
 void StopRuntime()
 {
     CancelMultiplayerFrame();
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    State.shuttingDown = true;
+#else
     {
         std::lock_guard<std::mutex> guard(State.frameMutex);
         State.shuttingDown = true;
@@ -526,6 +597,7 @@ void StopRuntime()
         if (slot->worker.joinable())
             slot->worker.join();
     }
+#endif
 
     for (auto& slot : State.slots)
     {
@@ -546,6 +618,9 @@ void StopRuntime()
     State.schedulerJitterProfile.store(0, std::memory_order_relaxed);
     State.loaded = false;
     State.lastFrameMs = 0.0;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    State.cooperativeSlices = 0;
+#endif
 }
 
 std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32_t romLength, Slot& slot, std::uint64_t seed)
@@ -582,11 +657,18 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
 
     melonDS::RendererSettings rendererSettings {
         .ScaleFactor = 1,
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+        .Threaded = false,
+#else
         .Threaded = true,
+#endif
         .HiresCoordinates = false,
         .BetterPolygons = false,
     };
     console->GetRenderer().SetRenderSettings(rendererSettings);
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    console->SPU.SetOutputEnabled(slot.context.id == State.visiblePlayer);
+#endif
     console->Start();
     return console;
 }
@@ -616,6 +698,25 @@ melonDS::LocalMP* LocalMultiplayer() noexcept
     return State.multiplayer.get();
 }
 
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+bool MultiplayerPacketsReady(void* userdata) noexcept
+{
+    return State.multiplayer && State.multiplayer->PacketsReady(InstanceId(userdata));
+}
+
+bool MultiplayerRepliesReady(void* userdata) noexcept
+{
+    return State.multiplayer && State.multiplayer->RepliesReady(InstanceId(userdata));
+}
+
+void RequestMultiplayerYield(void* userdata) noexcept
+{
+    const int player = InstanceId(userdata);
+    if (auto* slot = GetSlot(player); slot && slot->console)
+        slot->console->RequestCooperativeYield();
+}
+#endif
+
 bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexcept
 {
     auto* context = Context(userdata);
@@ -623,6 +724,16 @@ bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexce
     if (!context || player < 0 || player >= static_cast<int>(State.slots.size()))
         return false;
     ApplySchedulerJitter(*context);
+
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    (void)operation;
+    // The cooperative runtime invokes exactly one console at a time. Every
+    // LocalMP call is therefore already serialized, and the RAII scope asks
+    // the NDS frame stepper to hand control to the next console immediately
+    // after the operation completes.
+    return State.multiplayerFrameActive.load(std::memory_order_acquire)
+        && (State.multiplayerDoneMask.load(std::memory_order_acquire) & (1U << player)) == 0;
+#else
 
     const std::uint32_t playerBit = 1U << player;
     if (operation == MultiplayerOperation::RecvReplies
@@ -665,12 +776,16 @@ bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexce
     return State.multiplayerFrameActive.load(std::memory_order_acquire)
         && (State.multiplayerDoneMask.load(std::memory_order_acquire) & playerBit) == 0
         && State.multiplayerTurn.load(std::memory_order_acquire) == player;
+#endif
 }
 
 void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept
 {
     if (!scheduled)
         return;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    RequestMultiplayerYield(userdata);
+#else
     const int player = InstanceId(userdata);
     if (player >= 0 && player < static_cast<int>(State.slots.size()))
     {
@@ -682,6 +797,7 @@ void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept
             std::memory_order_acq_rel);
         NotifyMultiplayerProgress();
     }
+#endif
 }
 
 void NoteMultiplayerCommand(void* userdata) noexcept
@@ -755,8 +871,10 @@ REBIT_EXPORT int md_load(const std::uint8_t* rom, std::uint32_t romLength, int p
             State.slots.push_back(std::move(slot));
         }
 
+#ifndef REBIT_MELONDS_DUAL_COOPERATIVE
         for (auto& slot : State.slots)
             slot->worker = std::thread(WorkerLoop, slot.get());
+#endif
 
         State.loaded = true;
         return 1;
@@ -792,7 +910,13 @@ REBIT_EXPORT int md_player_count()
 REBIT_EXPORT void md_set_visible_player(int player)
 {
     if (rebit::GetSlot(player))
+    {
         rebit::State.visiblePlayer = player;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+        for (const auto& slot : rebit::State.slots)
+            slot->console->SPU.SetOutputEnabled(slot->context.id == player);
+#endif
+    }
 }
 
 REBIT_EXPORT int md_visible_player()
@@ -820,6 +944,10 @@ REBIT_EXPORT int md_run_frame()
         return 0;
 
     const auto started = std::chrono::steady_clock::now();
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    if (!RunCooperativeFrame())
+        return 0;
+#else
     BeginMultiplayerFrame();
     {
         std::unique_lock<std::mutex> lock(State.frameMutex);
@@ -843,6 +971,7 @@ REBIT_EXPORT int md_run_frame()
             }
         }
     }
+#endif
 
     if (auto* visible = GetSlot(State.visiblePlayer))
         CopyFramebuffer(*visible);

@@ -305,6 +305,11 @@ int MP_SendReply(u8* data, int len, u64 timestamp, u16 aid, void* userdata);
 int MP_SendAck(u8* data, int len, u64 timestamp, void* userdata);
 int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata);
 u16 MP_RecvReplies(u8* data, u64 timestamp, u16 aidmask, void* userdata);
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+bool MP_PacketsReady(void* userdata);
+bool MP_RepliesReady(void* userdata);
+void MP_RequestYield(void* userdata);
+#endif
 
 
 // network comm interface

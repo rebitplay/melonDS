@@ -1050,6 +1050,14 @@ bool Wifi::ProcessTX(TXSlot* slot, int num)
 
             if (num == 1)
             {
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+                if (MPClientMask && !Platform::MP_RepliesReady(NDS.UserData))
+                {
+                    slot->CurPhaseTime = 0;
+                    Platform::MP_RequestYield(NDS.UserData);
+                    return false;
+                }
+#endif
                 if (IOPORT(W_TXStatCnt) & 0x4000)
                 {
                     IOPORT(W_TXStat) = 0x0800;
@@ -1571,6 +1579,19 @@ bool Wifi::CheckRX(int type) // 0=regular 1=MP replies 2=MP host frames
 
     if (IOPORT(W_RXBufBegin) == IOPORT(W_RXBufEnd))
         return false;
+
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    // A LocalMP client normally polls its host queue with a short blocking
+    // receive. The cooperative runtime cannot block here because the host is
+    // another NDS instance on this same thread. Hand the scheduler to the
+    // other console when no host frame is queued, then retry on the next
+    // emulated timer event.
+    if (type == 2 && !Platform::MP_PacketsReady(NDS.UserData))
+    {
+        Platform::MP_RequestYield(NDS.UserData);
+        return false;
+    }
+#endif
 
     int rxlen;
     int framelen;

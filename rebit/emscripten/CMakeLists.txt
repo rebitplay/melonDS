@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(rebit_melonds_dual LANGUAGES C CXX)
 
+option(REBIT_MELONDS_DUAL_COOPERATIVE "Build the single-threaded cooperative WebAssembly runtime" OFF)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
@@ -39,32 +41,60 @@ target_include_directories(melonds_dual PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/melonds/src"
 )
 
-target_link_libraries(melonds_dual PRIVATE core Threads::Threads)
+target_link_libraries(melonds_dual PRIVATE core)
+if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
+    target_link_libraries(melonds_dual PRIVATE Threads::Threads)
+endif()
 set_property(TARGET melonds_dual PROPERTY CXX_STANDARD 20)
-target_compile_definitions(melonds_dual PRIVATE REBIT_MELONDS_DUAL_BUILD="melonds-dual-5")
+if(REBIT_MELONDS_DUAL_COOPERATIVE)
+    target_compile_definitions(core PUBLIC REBIT_MELONDS_DUAL_COOPERATIVE=1)
+    target_compile_definitions(melonds_dual PRIVATE
+        REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-1"
+        REBIT_MELONDS_DUAL_COOPERATIVE=1
+    )
+else()
+    target_compile_definitions(melonds_dual PRIVATE REBIT_MELONDS_DUAL_BUILD="melonds-dual-5")
+endif()
 
 if(EMSCRIPTEN)
-    target_compile_options(core PUBLIC "-pthread" "-msimd128")
-    target_compile_options(teakra PUBLIC "-pthread" "-msimd128")
-    target_compile_options(melonds_dual PRIVATE "-pthread" "-msimd128")
+    if(REBIT_MELONDS_DUAL_COOPERATIVE)
+        set(REBIT_MELONDS_DUAL_EXPORT_NAME createMelondsDualCooperativeModule)
+    else()
+        set(REBIT_MELONDS_DUAL_EXPORT_NAME createMelondsDualModule)
+    endif()
+
+    target_compile_options(core PUBLIC "-msimd128")
+    target_compile_options(teakra PUBLIC "-msimd128")
+    target_compile_options(melonds_dual PRIVATE "-msimd128")
+
+    if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
+        target_compile_options(core PUBLIC "-pthread")
+        target_compile_options(teakra PUBLIC "-pthread")
+        target_compile_options(melonds_dual PRIVATE "-pthread")
+    endif()
 
     target_link_options(melonds_dual PRIVATE
         "--no-entry"
-        "-pthread"
         "-msimd128"
         "-sMODULARIZE=1"
-        "-sEXPORT_NAME=createMelondsDualModule"
+        "-sEXPORT_NAME=${REBIT_MELONDS_DUAL_EXPORT_NAME}"
         "-sENVIRONMENT=worker,node"
         "-sALLOW_MEMORY_GROWTH=1"
         "-sINITIAL_MEMORY=335544320"
         "-sMAXIMUM_MEMORY=1073741824"
-        "-sPTHREAD_POOL_SIZE=4"
         "-sSTACK_SIZE=2097152"
         "-sNO_EXIT_RUNTIME=1"
         "-sDISABLE_EXCEPTION_CATCHING=0"
         "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32','HEAP16','ccall','cwrap','UTF8ToString']"
         "-sEXPORTED_FUNCTIONS=['_malloc','_free','_md_load','_md_destroy','_md_is_loaded','_md_player_count','_md_set_visible_player','_md_visible_player','_md_set_input','_md_run_frame','_md_frame','_md_framebuffer','_md_width','_md_height','_md_audio_sample_rate','_md_audio_available','_md_audio_read','_md_audio_buffer','_md_save_size','_md_save_data','_md_import_save','_md_export_checkpoint','_md_checkpoint_size','_md_checkpoint_data','_md_clear_checkpoint','_md_import_checkpoint','_md_set_scheduler_jitter','_md_inject_desync_for_test','_md_state_hash','_md_mp_packets_sent','_md_mp_packets_received','_md_mp_commands','_md_mp_replies','_md_last_frame_ms','_md_build_id','_md_last_error']"
     )
+
+    if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
+        target_link_options(melonds_dual PRIVATE
+            "-pthread"
+            "-sPTHREAD_POOL_SIZE=4"
+        )
+    endif()
 
     set_target_properties(melonds_dual PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/dist"

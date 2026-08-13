@@ -33,3 +33,22 @@ cmake --build build/wasm --parallel
 
 Artifacts are written to `build/wasm/dist/melonds_dual.{js,wasm}`. Emscripten
 embeds the pthread bootstrap in the modularized JavaScript wrapper.
+
+## Cooperative mobile WebAssembly build
+
+The cooperative profile advances each emulated NDS in deterministic slices on
+one Worker. It does not use pthreads or shared WebAssembly memory, so it works
+inside Android/iOS WebViews without COOP/COEP, `SharedArrayBuffer`, or
+`OffscreenCanvas`.
+
+```bash
+source /path/to/emsdk/emsdk_env.sh
+emcmake cmake -S rebit/emscripten -B build/wasm-cooperative -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DREBIT_MELONDS_DUAL_COOPERATIVE=ON
+cmake --build build/wasm-cooperative --parallel
+```
+
+The cooperative artifacts are emitted under the same build directory with the
+immutable build ID `melonds-dual-cooperative-1`; the publishing pipeline gives
+them distinct filenames from the threaded profile.

@@ -255,6 +255,9 @@ public:
     int ReadOutput(s16* data, int samples);
     void SetOutputSampleRate(double rate);
     void SetOutputSkew(double skew);
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    void SetOutputEnabled(bool enabled) noexcept { OutputEnabled = enabled; }
+#endif
 
     u8 Read8(u32 addr);
     u16 Read16(u32 addr);
@@ -267,6 +270,9 @@ private:
     u32 OutputBufferSize = 0;
     double OutputSampleRate;
     double OutputSkew = 1.0;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    bool OutputEnabled = true;
+#endif
     melonDS::NDS& NDS;
 
     blip_t* BlipLeft;

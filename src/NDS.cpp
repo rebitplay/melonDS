@@ -1092,6 +1092,127 @@ u32 NDS::RunFrame()
     }
 }
 
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+bool NDS::BeginCooperativeFrame()
+{
+    if (CooperativeFrameActive)
+        return false;
+    Current = this;
+    FrameStartTimestamp = SysTimestamp;
+    GPU.TotalScanlines = 0;
+    LagFrameFlag = true;
+    CooperativeFrameActive = true;
+    CooperativeFrameStarted = false;
+    CooperativeYieldRequested = false;
+    CooperativeFrameTarget = SysTimestamp + 560190;
+    return true;
+}
+
+bool NDS::RunCooperativeFrameSlice()
+{
+    if (!CooperativeFrameActive)
+        return true;
+    Current = this;
+
+    // LocalMP calls request an immediate cooperative yield below, so the
+    // ordinary scheduler path can run in a large batch without delaying a
+    // radio hand-off. Keeping this batch large avoids repeatedly swapping the
+    // two complete NDS execution contexts while neither console is using its
+    // wireless hardware (the common case during boot and single-player UI).
+    constexpr int MaximumIterationsPerSlice = 32768;
+    for (int iteration = 0; iteration < MaximumIterationsPerSlice && GPU.TotalScanlines == 0; ++iteration)
+    {
+        if (CPUStop & CPUStop_Sleep)
+        {
+            u64 target = NextTargetSleep();
+            if (target > CooperativeFrameTarget)
+                target = CooperativeFrameTarget;
+
+            ARM9Timestamp = target << ARM9ClockShift;
+            ARM7Timestamp = target;
+            TimerTimestamp[0] = target;
+            TimerTimestamp[1] = target;
+            GPU.GPU3D.Timestamp = target;
+            RunSystemSleep(target);
+
+            if (SysTimestamp >= CooperativeFrameTarget)
+                GPU.BlankFrame();
+        }
+        else
+        {
+            if (!CooperativeFrameStarted)
+            {
+                if (!(CPUStop & CPUStop_Wakeup))
+                    GPU.StartFrame();
+                CPUStop &= ~CPUStop_Wakeup;
+                CooperativeFrameStarted = true;
+            }
+
+            u64 target = NextTarget();
+            ARM9Target = target << ARM9ClockShift;
+            CurCPU = 0;
+
+            if (CPUStop & CPUStop_GXStall)
+            {
+                s32 cycles = GPU.GPU3D.CyclesToRunFor();
+                ARM9Timestamp = std::min(ARM9Target, ARM9Timestamp + (cycles << ARM9ClockShift));
+            }
+            else if (CPUStop & CPUStop_DMA9)
+            {
+                DMAs[0].Run();
+                if (!(CPUStop & CPUStop_GXStall)) DMAs[1].Run();
+                if (!(CPUStop & CPUStop_GXStall)) DMAs[2].Run();
+                if (!(CPUStop & CPUStop_GXStall)) DMAs[3].Run();
+            }
+            else
+            {
+                ARM9.Execute<CPUExecuteMode::Interpreter>();
+            }
+
+            RunTimers(0);
+            GPU.GPU3D.Run();
+
+            target = ARM9Timestamp >> ARM9ClockShift;
+            CurCPU = 1;
+            while (ARM7Timestamp < target)
+            {
+                ARM7Target = target;
+                if (CPUStop & CPUStop_DMA7)
+                {
+                    DMAs[4].Run();
+                    DMAs[5].Run();
+                    DMAs[6].Run();
+                    DMAs[7].Run();
+                }
+                else
+                {
+                    ARM7.Execute<CPUExecuteMode::Interpreter>();
+                }
+                RunTimers(1);
+            }
+
+            RunSystem(target);
+        }
+
+        if (CooperativeYieldRequested)
+        {
+            CooperativeYieldRequested = false;
+            break;
+        }
+    }
+
+    if (GPU.TotalScanlines == 0)
+        return false;
+
+    SPU.BufferAudio();
+    NumFrames++;
+    if (LagFrameFlag)
+        NumLagFrames++;
+    CooperativeFrameActive = false;
+    return true;
+}
+#endif
+
 void NDS::Reschedule(u64 target)
 {
     if (CurCPU == 0)

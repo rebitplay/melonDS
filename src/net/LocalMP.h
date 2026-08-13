@@ -63,6 +63,10 @@ public:
     int SendAck(int inst, u8* data, int len, u64 timestamp);
     int RecvHostPacket(int inst, u8* data, u64* timestamp);
     u16 RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask);
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    bool PacketsReady(int inst) noexcept;
+    bool RepliesReady(int inst) noexcept;
+#endif
 
     std::vector<u8> SerializeState();
     bool DeserializeState(const u8* data, std::size_t length);

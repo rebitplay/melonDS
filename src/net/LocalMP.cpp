@@ -374,6 +374,30 @@ int LocalMP::RecvHostPacket(int inst, u8* packet, u64* timestamp)
     return RecvPacketGeneric(inst, packet, true, timestamp);
 }
 
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+bool LocalMP::PacketsReady(int inst) noexcept
+{
+    if (inst < 0 || inst >= 16)
+        return false;
+    Mutex_Lock(MPQueueLock);
+    const bool ready = PacketSignalCount[inst] > 0;
+    Mutex_Unlock(MPQueueLock);
+    return ready;
+}
+
+bool LocalMP::RepliesReady(int inst) noexcept
+{
+    if (inst < 0 || inst >= 16)
+        return false;
+    Mutex_Lock(MPQueueLock);
+    const u16 connected = MPStatus.ConnectedBitmask;
+    const u16 others = connected & ~(1 << inst);
+    const bool ready = others == 0 || ReplySignalCount[inst] > 0;
+    Mutex_Unlock(MPQueueLock);
+    return ready;
+}
+#endif
+
 u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
 {
     u16 ret = 0;

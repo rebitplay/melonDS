@@ -413,6 +413,12 @@ public: // TODO: Encapsulate the rest of these members
     std::unique_ptr<GBACart::CartCommon> EjectGBACart() { return GBACartSlot.EjectCart(); }
 
     u32 RunFrame();
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    bool BeginCooperativeFrame();
+    bool RunCooperativeFrameSlice();
+    void RequestCooperativeYield() noexcept { CooperativeYieldRequested = true; }
+    [[nodiscard]] bool CooperativeFrameComplete() const noexcept { return CooperativeFrameActive == false; }
+#endif
 
     bool IsRunning() const noexcept { return Running; }
 
@@ -535,6 +541,12 @@ protected:
     bool RunningGame;
     u64 LastSysClockCycles;
     u64 FrameStartTimestamp;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    bool CooperativeFrameActive = false;
+    bool CooperativeFrameStarted = false;
+    bool CooperativeYieldRequested = false;
+    u64 CooperativeFrameTarget = 0;
+#endif
     u64 NextTarget();
     u64 NextTargetSleep();
     void CheckKeyIRQ(u32 cpu, u32 oldkey, u32 newkey);

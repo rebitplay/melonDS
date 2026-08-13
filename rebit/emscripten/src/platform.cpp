@@ -458,6 +458,23 @@ u16 MP_RecvReplies(u8* data, u64 timestamp, u16 aidMask, void* userdata)
     return replies;
 }
 
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+bool MP_PacketsReady(void* userdata)
+{
+    return rebit::MultiplayerPacketsReady(userdata);
+}
+
+bool MP_RepliesReady(void* userdata)
+{
+    return rebit::MultiplayerRepliesReady(userdata);
+}
+
+void MP_RequestYield(void* userdata)
+{
+    rebit::RequestMultiplayerYield(userdata);
+}
+#endif
+
 int Net_SendPacket(u8*, int, void*) { return 0; }
 int Net_RecvPacket(u8*, void*) { return 0; }
 

@@ -1008,6 +1008,18 @@ void SPU::Mix(u32 spucycles)
 
     BlipTimer += spucycles;
 
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    if (!OutputEnabled)
+    {
+        OutputLastSamples[0] = output[0];
+        OutputLastSamples[1] = output[1];
+        if (BlipTimer >= 512 * 128)
+            BlipTimer = 0;
+        NDS.ScheduleEvent(Event_SPU, true, MixInterval, 0, MixInterval >> 1);
+        return;
+    }
+#endif
+
     if (output[0] != OutputLastSamples[0])
         blip_add_delta(BlipLeft, BlipTimer, (int) output[0] - OutputLastSamples[0]);
     if (output[1] != OutputLastSamples[1])
@@ -1024,6 +1036,13 @@ void SPU::Mix(u32 spucycles)
 
 void SPU::BufferAudio()
 {
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    if (!OutputEnabled)
+    {
+        BlipTimer = 0;
+        return;
+    }
+#endif
     blip_end_frame(BlipLeft, BlipTimer);
     blip_end_frame(BlipRight, BlipTimer);
     BlipTimer = 0;

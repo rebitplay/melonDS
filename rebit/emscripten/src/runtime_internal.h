@@ -40,6 +40,11 @@ enum class MultiplayerOperation : std::uint8_t
 int InstanceId(void* userdata) noexcept;
 SlotContext* Context(void* userdata) noexcept;
 melonDS::LocalMP* LocalMultiplayer() noexcept;
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+bool MultiplayerPacketsReady(void* userdata) noexcept;
+bool MultiplayerRepliesReady(void* userdata) noexcept;
+void RequestMultiplayerYield(void* userdata) noexcept;
+#endif
 bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexcept;
 void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept;
 void NoteMultiplayerCommand(void* userdata) noexcept;
