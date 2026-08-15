@@ -11,12 +11,39 @@ between browsers. Each seat has an independent SRAM import/export path so the
 owning player's save is loaded before the first synchronized frame and can be
 persisted again at a session barrier.
 
-## Native proof build
+All production implementations use the implementation-neutral engine identity
+`melonds-dual-parallel-1` and runtime ABI `rebit-melonds-parallel-v1`. The
+WebAssembly and Android builds must remain state/checkpoint compatible so a
+room never depends on the participant's operating system.
+
+## Native SDK and proof build
 
 ```bash
 cmake -S rebit/emscripten -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/native --parallel
 ./build/native/melonds_dual /authorized/game.nds 600 /tmp/melonds-dual
+```
+
+The reusable target is `rebit_melonds_dual_runtime`; its stable C API is
+published in `include/rebit_melonds_dual.h`. Disable the CLI with
+`-DREBIT_MELONDS_DUAL_BUILD_CLI=OFF` when embedding the library.
+
+## Android SDK
+
+`../android-sdk` is an Android library module for API 29+. It builds the same
+parallel interpreter runtime and supplies a thin JNI interface. JIT execution
+is deliberately disabled because it does not reproduce the WebAssembly state
+hash; native threaded interpreter execution retains deterministic checkpoints
+while providing the required performance headroom. The application layer owns
+the Capacitor plugin and surface placement; the SDK owns emulation, EGL
+presentation, and AAudio output.
+
+The Android build supports `arm64-v8a` and `x86_64` and is pinned to NDK
+28.2.13676358. It can be included directly from a Gradle settings file:
+
+```groovy
+include ':rebit-melonds-native'
+project(':rebit-melonds-native').projectDir = file('path/to/melonDS/rebit/android-sdk')
 ```
 
 ## WebAssembly build
@@ -34,12 +61,11 @@ cmake --build build/wasm --parallel
 Artifacts are written to `build/wasm/dist/melonds_dual.{js,wasm}`. Emscripten
 embeds the pthread bootstrap in the modularized JavaScript wrapper.
 
-## Cooperative mobile WebAssembly build
+## Historical cooperative WebAssembly build
 
-The cooperative profile advances each emulated NDS in deterministic slices on
-one Worker. It does not use pthreads or shared WebAssembly memory, so it works
-inside Android/iOS WebViews without COOP/COEP, `SharedArrayBuffer`, or
-`OffscreenCanvas`.
+The cooperative profile is retained only for reproducibility of the rejected
+mobile experiment. It does not meet Rebit's 59 FPS release gate and must not be
+used for production rooms or new releases.
 
 ```bash
 source /path/to/emsdk/emsdk_env.sh

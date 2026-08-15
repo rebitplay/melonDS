@@ -1,0 +1,1 @@
+-keep class cc.rebit.melonds.RebitMelonDSNative { *; }
