@@ -73,8 +73,32 @@ class AudioOutput
 public:
     bool EnsureStarted()
     {
-        if (Stream && AAudioStream_getState(Stream) != AAUDIO_STREAM_STATE_DISCONNECTED)
-            return true;
+        if (Stream)
+        {
+            aaudio_stream_state_t state = AAudioStream_getState(Stream);
+            if (state == AAUDIO_STREAM_STATE_PAUSING || state == AAUDIO_STREAM_STATE_STOPPING)
+            {
+                aaudio_stream_state_t next = state;
+                AAudioStream_waitForStateChange(Stream, state, &next, 100'000'000);
+                state = next;
+            }
+            if (state == AAUDIO_STREAM_STATE_STARTED || state == AAUDIO_STREAM_STATE_STARTING)
+            {
+                Running.store(true, std::memory_order_release);
+                return true;
+            }
+            if (state != AAUDIO_STREAM_STATE_DISCONNECTED
+                && state != AAUDIO_STREAM_STATE_CLOSING
+                && state != AAUDIO_STREAM_STATE_CLOSED)
+            {
+                const aaudio_result_t restart = AAudioStream_requestStart(Stream);
+                if (restart == AAUDIO_OK)
+                {
+                    Running.store(true, std::memory_order_release);
+                    return true;
+                }
+            }
+        }
 
         Stop();
         AAudioStreamBuilder* builder = nullptr;
@@ -137,6 +161,8 @@ public:
         if (Stream)
             AAudioStream_requestPause(Stream);
         Running.store(false, std::memory_order_release);
+        ReadFrame.store(0, std::memory_order_release);
+        WriteFrame.store(0, std::memory_order_release);
     }
 
     void Stop()
@@ -150,6 +176,8 @@ public:
         }
         ReadFrame.store(0, std::memory_order_release);
         WriteFrame.store(0, std::memory_order_release);
+        Underflows.store(0, std::memory_order_release);
+        DroppedFrames.store(0, std::memory_order_release);
     }
 
     void SetVolume(float volume)
@@ -692,8 +720,6 @@ Java_cc_rebit_melonds_RebitMelonDSNative_nativeRunFrame(
     if (!Video.Render(md_framebuffer(md_visible_player())))
         return JNI_FALSE;
     Audio.PumpCoreAudio();
-    if (!Audio.EnsureStarted())
-        return JNI_FALSE;
     return JNI_TRUE;
 }
 

@@ -39,9 +39,14 @@ public:
     void PostSavestate() override;
 
     void SetRenderSettings(RendererSettings& settings) override;
+    void SetOutputEnabled(bool enabled) override;
 
     void DrawScanline(u32 line) override;
     void DrawSprites(u32 line) override;
+
+    void Start3DRendering() override;
+    void Finish3DRendering() override;
+    void Restart3DRendering() override;
 
     void VBlank() override {};
     void VBlankEnd() override {};
@@ -59,6 +64,9 @@ private:
 
     u32* Output3D;
     alignas(8) u32 Output2D[2][256];
+    bool OutputEnabled = true;
+    bool ThreadedOutput = false;
+    bool RenderingCurrentFrame = true;
 
     void DrawScanlineA(u32 line, u32* dst);
     void DrawScanlineB(u32 line, u32* dst);

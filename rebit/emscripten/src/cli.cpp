@@ -31,32 +31,59 @@ bool WritePpm(const std::string& path, const std::uint32_t* pixels, int width, i
     return stream.good();
 }
 
+bool ReadFile(const std::string& path, std::vector<std::uint8_t>& bytes)
+{
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream)
+        return false;
+    const auto length = stream.tellg();
+    if (length <= 0)
+        return false;
+    stream.seekg(0);
+    bytes.resize(static_cast<std::size_t>(length));
+    stream.read(reinterpret_cast<char*>(bytes.data()), length);
+    return stream.good();
+}
+
 }
 
 int main(int argc, char** argv)
 {
     if (argc < 2)
     {
-        std::fprintf(stderr, "usage: melonds_dual <rom.nds> [frames] [screenshot-prefix]\n");
+        std::fprintf(stderr, "usage: melonds_dual <rom.nds> [frames] [screenshot-prefix|-] [checkpoint]\n");
         return 2;
     }
 
-    std::ifstream romStream(argv[1], std::ios::binary | std::ios::ate);
-    if (!romStream)
+    std::vector<std::uint8_t> rom;
+    if (!ReadFile(argv[1], rom))
     {
         std::fprintf(stderr, "could not open ROM: %s\n", argv[1]);
         return 2;
     }
-    const auto length = romStream.tellg();
-    romStream.seekg(0);
-    std::vector<std::uint8_t> rom(static_cast<std::size_t>(length));
-    romStream.read(reinterpret_cast<char*>(rom.data()), length);
 
     const int frames = argc >= 3 ? std::max(1, std::atoi(argv[2])) : 600;
     if (!md_load(rom.data(), static_cast<std::uint32_t>(rom.size()), 2, 0x12345678U, 0x9ABCDEF0U))
     {
         std::fprintf(stderr, "load failed: %s\n", md_last_error());
         return 1;
+    }
+
+    if (argc >= 5)
+    {
+        std::vector<std::uint8_t> checkpoint;
+        if (!ReadFile(argv[4], checkpoint))
+        {
+            std::fprintf(stderr, "could not open checkpoint: %s\n", argv[4]);
+            md_destroy();
+            return 2;
+        }
+        if (!md_import_checkpoint(checkpoint.data(), static_cast<std::uint32_t>(checkpoint.size())))
+        {
+            std::fprintf(stderr, "checkpoint import failed: %s\n", md_last_error());
+            md_destroy();
+            return 1;
+        }
     }
 
     const auto started = std::chrono::steady_clock::now();
@@ -73,7 +100,7 @@ int main(int argc, char** argv)
     }
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 
-    if (argc >= 4)
+    if (argc >= 4 && std::string(argv[3]) != "-")
     {
         for (int player = 0; player < 2; ++player)
             WritePpm(std::string(argv[3]) + "-p" + std::to_string(player + 1) + ".ppm", md_framebuffer(player), md_width(), md_height());

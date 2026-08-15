@@ -671,7 +671,11 @@ void ARMv5::Execute()
 
                 // actually execute
                 u32 icode = (CurInstr >> 6) & 0x3FF;
+#ifdef __EMSCRIPTEN__
+                ARMInterpreter::DispatchTHUMB(this, icode);
+#else
                 ARMInterpreter::THUMBInstrTable[icode](this);
+#endif
             }
             else
             {
@@ -688,7 +692,11 @@ void ARMv5::Execute()
                 if (CheckCondition(CurInstr >> 28))
                 {
                     u32 icode = ((CurInstr >> 4) & 0xF) | ((CurInstr >> 16) & 0xFF0);
+#ifdef __EMSCRIPTEN__
+                    ARMInterpreter::DispatchARM(this, icode);
+#else
                     ARMInterpreter::ARMInstrTable[icode](this);
+#endif
                 }
                 else if ((CurInstr & 0xFE000000) == 0xFA000000)
                 {
@@ -809,7 +817,11 @@ void ARMv4::Execute()
 
                 // actually execute
                 u32 icode = (CurInstr >> 6);
+#ifdef __EMSCRIPTEN__
+                ARMInterpreter::DispatchTHUMB(this, icode);
+#else
                 ARMInterpreter::THUMBInstrTable[icode](this);
+#endif
             }
             else
             {
@@ -826,7 +838,11 @@ void ARMv4::Execute()
                 if (CheckCondition(CurInstr >> 28))
                 {
                     u32 icode = ((CurInstr >> 4) & 0xF) | ((CurInstr >> 16) & 0xFF0);
+#ifdef __EMSCRIPTEN__
+                    ARMInterpreter::DispatchARM(this, icode);
+#else
                     ARMInterpreter::ARMInstrTable[icode](this);
+#endif
                 }
                 else
                     AddCycles_C();
@@ -1250,62 +1266,248 @@ void ARMv4::AddCycles_CD()
 
 u8 ARMv5::BusRead8(u32 addr)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+        return NDS.MainRAM[addr & NDS.MainRAMMask];
+    if ((addr & 0xFF000000) == 0x03000000)
+        return NDS.SWRAM_ARM9.Mem ? NDS.SWRAM_ARM9.Mem[addr & NDS.SWRAM_ARM9.Mask] : 0;
+    return NDS.melonDS::NDS::ARM9Read8(addr);
+#else
     return NDS.ARM9Read8(addr);
+#endif
 }
 
 u16 ARMv5::BusRead16(u32 addr)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+        return *reinterpret_cast<u16*>(&NDS.MainRAM[addr & NDS.MainRAMMask]);
+    if ((addr & 0xFF000000) == 0x03000000)
+        return NDS.SWRAM_ARM9.Mem
+            ? *reinterpret_cast<u16*>(&NDS.SWRAM_ARM9.Mem[addr & NDS.SWRAM_ARM9.Mask])
+            : 0;
+    return NDS.melonDS::NDS::ARM9Read16(addr);
+#else
     return NDS.ARM9Read16(addr);
+#endif
 }
 
 u32 ARMv5::BusRead32(u32 addr)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+        return *reinterpret_cast<u32*>(&NDS.MainRAM[addr & NDS.MainRAMMask]);
+    if ((addr & 0xFF000000) == 0x03000000)
+        return NDS.SWRAM_ARM9.Mem
+            ? *reinterpret_cast<u32*>(&NDS.SWRAM_ARM9.Mem[addr & NDS.SWRAM_ARM9.Mask])
+            : 0;
+    return NDS.melonDS::NDS::ARM9Read32(addr);
+#else
     return NDS.ARM9Read32(addr);
+#endif
 }
 
 void ARMv5::BusWrite8(u32 addr, u8 val)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+    {
+        NDS.JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
+        NDS.MainRAM[addr & NDS.MainRAMMask] = val;
+        return;
+    }
+    if ((addr & 0xFF000000) == 0x03000000)
+    {
+        if (NDS.SWRAM_ARM9.Mem)
+        {
+            NDS.JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_SharedWRAM>(addr);
+            NDS.SWRAM_ARM9.Mem[addr & NDS.SWRAM_ARM9.Mask] = val;
+        }
+        return;
+    }
+    NDS.melonDS::NDS::ARM9Write8(addr, val);
+#else
     NDS.ARM9Write8(addr, val);
+#endif
 }
 
 void ARMv5::BusWrite16(u32 addr, u16 val)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+    {
+        NDS.JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
+        *reinterpret_cast<u16*>(&NDS.MainRAM[addr & NDS.MainRAMMask]) = val;
+        return;
+    }
+    if ((addr & 0xFF000000) == 0x03000000)
+    {
+        if (NDS.SWRAM_ARM9.Mem)
+        {
+            NDS.JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_SharedWRAM>(addr);
+            *reinterpret_cast<u16*>(&NDS.SWRAM_ARM9.Mem[addr & NDS.SWRAM_ARM9.Mask]) = val;
+        }
+        return;
+    }
+    NDS.melonDS::NDS::ARM9Write16(addr, val);
+#else
     NDS.ARM9Write16(addr, val);
+#endif
 }
 
 void ARMv5::BusWrite32(u32 addr, u32 val)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+    {
+        NDS.JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
+        *reinterpret_cast<u32*>(&NDS.MainRAM[addr & NDS.MainRAMMask]) = val;
+        return;
+    }
+    if ((addr & 0xFF000000) == 0x03000000)
+    {
+        if (NDS.SWRAM_ARM9.Mem)
+        {
+            NDS.JIT.CheckAndInvalidate<0, ARMJIT_Memory::memregion_SharedWRAM>(addr);
+            *reinterpret_cast<u32*>(&NDS.SWRAM_ARM9.Mem[addr & NDS.SWRAM_ARM9.Mask]) = val;
+        }
+        return;
+    }
+    NDS.melonDS::NDS::ARM9Write32(addr, val);
+#else
     NDS.ARM9Write32(addr, val);
+#endif
 }
 
 u8 ARMv4::BusRead8(u32 addr)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+        return NDS.MainRAM[addr & NDS.MainRAMMask];
+    if ((addr & 0xFF800000) == 0x03000000)
+        return NDS.SWRAM_ARM7.Mem
+            ? NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask]
+            : NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)];
+    if ((addr & 0xFF800000) == 0x03800000)
+        return NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)];
+    return NDS.melonDS::NDS::ARM7Read8(addr);
+#else
     return NDS.ARM7Read8(addr);
+#endif
 }
 
 u16 ARMv4::BusRead16(u32 addr)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+        return *reinterpret_cast<u16*>(&NDS.MainRAM[addr & NDS.MainRAMMask]);
+    if ((addr & 0xFF800000) == 0x03000000)
+        return NDS.SWRAM_ARM7.Mem
+            ? *reinterpret_cast<u16*>(&NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask])
+            : *reinterpret_cast<u16*>(&NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)]);
+    if ((addr & 0xFF800000) == 0x03800000)
+        return *reinterpret_cast<u16*>(&NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)]);
+    return NDS.melonDS::NDS::ARM7Read16(addr);
+#else
     return NDS.ARM7Read16(addr);
+#endif
 }
 
 u32 ARMv4::BusRead32(u32 addr)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+        return *reinterpret_cast<u32*>(&NDS.MainRAM[addr & NDS.MainRAMMask]);
+    if ((addr & 0xFF800000) == 0x03000000)
+        return NDS.SWRAM_ARM7.Mem
+            ? *reinterpret_cast<u32*>(&NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask])
+            : *reinterpret_cast<u32*>(&NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)]);
+    if ((addr & 0xFF800000) == 0x03800000)
+        return *reinterpret_cast<u32*>(&NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)]);
+    return NDS.melonDS::NDS::ARM7Read32(addr);
+#else
     return NDS.ARM7Read32(addr);
+#endif
 }
 
 void ARMv4::BusWrite8(u32 addr, u8 val)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
+        NDS.MainRAM[addr & NDS.MainRAMMask] = val;
+        return;
+    }
+    if ((addr & 0xFF800000) == 0x03000000 && NDS.SWRAM_ARM7.Mem)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_SharedWRAM>(addr);
+        NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask] = val;
+        return;
+    }
+    if ((addr & 0xFF800000) == 0x03000000 || (addr & 0xFF800000) == 0x03800000)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
+        NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)] = val;
+        return;
+    }
+    NDS.melonDS::NDS::ARM7Write8(addr, val);
+#else
     NDS.ARM7Write8(addr, val);
+#endif
 }
 
 void ARMv4::BusWrite16(u32 addr, u16 val)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
+        *reinterpret_cast<u16*>(&NDS.MainRAM[addr & NDS.MainRAMMask]) = val;
+        return;
+    }
+    if ((addr & 0xFF800000) == 0x03000000 && NDS.SWRAM_ARM7.Mem)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_SharedWRAM>(addr);
+        *reinterpret_cast<u16*>(&NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask]) = val;
+        return;
+    }
+    if ((addr & 0xFF800000) == 0x03000000 || (addr & 0xFF800000) == 0x03800000)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
+        *reinterpret_cast<u16*>(&NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)]) = val;
+        return;
+    }
+    NDS.melonDS::NDS::ARM7Write16(addr, val);
+#else
     NDS.ARM7Write16(addr, val);
+#endif
 }
 
 void ARMv4::BusWrite32(u32 addr, u32 val)
 {
+#ifdef REBIT_MELONDS_NDS_ONLY
+    if ((addr & 0xFF000000) == 0x02000000)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
+        *reinterpret_cast<u32*>(&NDS.MainRAM[addr & NDS.MainRAMMask]) = val;
+        return;
+    }
+    if ((addr & 0xFF800000) == 0x03000000 && NDS.SWRAM_ARM7.Mem)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_SharedWRAM>(addr);
+        *reinterpret_cast<u32*>(&NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask]) = val;
+        return;
+    }
+    if ((addr & 0xFF800000) == 0x03000000 || (addr & 0xFF800000) == 0x03800000)
+    {
+        NDS.JIT.CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
+        *reinterpret_cast<u32*>(&NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1)]) = val;
+        return;
+    }
+    NDS.melonDS::NDS::ARM7Write32(addr, val);
+#else
     NDS.ARM7Write32(addr, val);
+#endif
 }
 }
-

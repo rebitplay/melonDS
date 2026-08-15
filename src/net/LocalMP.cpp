@@ -40,6 +40,54 @@ constexpr u32 LocalMPStateMagic = 0x504D4252; // "RBMP" in little endian.
 constexpr u32 LocalMPStateVersion = 1;
 constexpr u32 MaximumSerializedSignals = 8192;
 
+void QueueLock(Platform::Mutex* mutex) noexcept
+{
+#if !defined(REBIT_MELONDS_DUAL_SCHEDULED)
+    Platform::Mutex_Lock(mutex);
+#else
+    (void)mutex;
+#endif
+}
+
+void QueueUnlock(Platform::Mutex* mutex) noexcept
+{
+#if !defined(REBIT_MELONDS_DUAL_SCHEDULED)
+    Platform::Mutex_Unlock(mutex);
+#else
+    (void)mutex;
+#endif
+}
+
+void ResetSignal(Platform::Semaphore* semaphore) noexcept
+{
+#if !defined(REBIT_MELONDS_DUAL_SCHEDULED)
+    Platform::Semaphore_Reset(semaphore);
+#else
+    (void)semaphore;
+#endif
+}
+
+void PostSignal(Platform::Semaphore* semaphore) noexcept
+{
+#if !defined(REBIT_MELONDS_DUAL_SCHEDULED)
+    Platform::Semaphore_Post(semaphore);
+#else
+    (void)semaphore;
+#endif
+}
+
+bool TryWaitSignal(Platform::Semaphore* semaphore, u32 pending, int timeout) noexcept
+{
+#if !defined(REBIT_MELONDS_DUAL_SCHEDULED)
+    (void)pending;
+    return Platform::Semaphore_TryWait(semaphore, timeout);
+#else
+    (void)semaphore;
+    (void)timeout;
+    return pending > 0;
+#endif
+}
+
 void Append16(std::vector<u8>& output, u16 value)
 {
     output.push_back(static_cast<u8>(value));
@@ -120,22 +168,22 @@ LocalMP::~LocalMP() noexcept
 
 void LocalMP::Begin(int inst)
 {
-    Mutex_Lock(MPQueueLock);
+    QueueLock(MPQueueLock);
     PacketReadOffset[inst] = MPStatus.PacketWriteOffset;
     ReplyReadOffset[inst] = MPStatus.ReplyWriteOffset;
-    Semaphore_Reset(SemPool[inst]);
-    Semaphore_Reset(SemPool[16 + inst]);
+    ResetSignal(SemPool[inst]);
+    ResetSignal(SemPool[16 + inst]);
     PacketSignalCount[inst] = 0;
     ReplySignalCount[inst] = 0;
     MPStatus.ConnectedBitmask |= (1 << inst);
-    Mutex_Unlock(MPQueueLock);
+    QueueUnlock(MPQueueLock);
 }
 
 void LocalMP::End(int inst)
 {
-    Mutex_Lock(MPQueueLock);
+    QueueLock(MPQueueLock);
     MPStatus.ConnectedBitmask &= ~(1 << inst);
-    Mutex_Unlock(MPQueueLock);
+    QueueUnlock(MPQueueLock);
 }
 
 void LocalMP::FIFORead(int inst, int fifo, void* buf, int len) noexcept
@@ -216,7 +264,7 @@ int LocalMP::SendPacketGeneric(int inst, u32 type, u8* packet, int len, u64 time
         return 0;
     }
 
-    Mutex_Lock(MPQueueLock);
+    QueueLock(MPQueueLock);
 
     u16 mask = MPStatus.ConnectedBitmask;
 
@@ -242,7 +290,7 @@ int LocalMP::SendPacketGeneric(int inst, u32 type, u8* packet, int len, u64 time
         MPStatus.MPHostinst = inst;
         MPStatus.MPReplyBitmask = 0;
         ReplyReadOffset[inst] = MPStatus.ReplyWriteOffset;
-        Semaphore_Reset(SemPool[16 + inst]);
+        ResetSignal(SemPool[16 + inst]);
         ReplySignalCount[inst] = 0;
     }
     else if (type == 2)
@@ -263,19 +311,19 @@ int LocalMP::SendPacketGeneric(int inst, u32 type, u8* packet, int len, u64 time
                 ++PacketSignalCount[i];
     }
 
-    Mutex_Unlock(MPQueueLock);
+    QueueUnlock(MPQueueLock);
 
     if (type == 2)
     {
         if (replyHost >= 0 && replyHost < 16)
-            Semaphore_Post(SemPool[16 + replyHost]);
+            PostSignal(SemPool[16 + replyHost]);
     }
     else
     {
         for (int i = 0; i < 16; i++)
         {
             if (mask & (1<<i))
-                Semaphore_Post(SemPool[i]);
+                PostSignal(SemPool[i]);
         }
     }
 
@@ -286,12 +334,12 @@ int LocalMP::RecvPacketGeneric(int inst, u8* packet, bool block, u64* timestamp)
 {
     for (;;)
     {
-        if (!Semaphore_TryWait(SemPool[inst], block ? RecvTimeout : 0))
+        if (!TryWaitSignal(SemPool[inst], PacketSignalCount[inst], block ? RecvTimeout : 0))
         {
             return 0;
         }
 
-        Mutex_Lock(MPQueueLock);
+        QueueLock(MPQueueLock);
 
         if (PacketSignalCount[inst] > 0)
             --PacketSignalCount[inst];
@@ -303,9 +351,9 @@ int LocalMP::RecvPacketGeneric(int inst, u8* packet, bool block, u64* timestamp)
         {
             Log(LogLevel::Warn, "PACKET FIFO OVERFLOW\n");
             PacketReadOffset[inst] = MPStatus.PacketWriteOffset;
-            Semaphore_Reset(SemPool[inst]);
+            ResetSignal(SemPool[inst]);
             PacketSignalCount[inst] = 0;
-            Mutex_Unlock(MPQueueLock);
+            QueueUnlock(MPQueueLock);
             return 0;
         }
 
@@ -316,7 +364,7 @@ int LocalMP::RecvPacketGeneric(int inst, u8* packet, bool block, u64* timestamp)
             if (PacketReadOffset[inst] >= kPacketQueueSize)
                 PacketReadOffset[inst] -= kPacketQueueSize;
 
-            Mutex_Unlock(MPQueueLock);
+            QueueUnlock(MPQueueLock);
             continue;
         }
 
@@ -329,7 +377,7 @@ int LocalMP::RecvPacketGeneric(int inst, u8* packet, bool block, u64* timestamp)
         }
 
         if (timestamp) *timestamp = pktheader.Timestamp;
-        Mutex_Unlock(MPQueueLock);
+        QueueUnlock(MPQueueLock);
         return pktheader.Length;
     }
 }
@@ -379,9 +427,9 @@ bool LocalMP::PacketsReady(int inst) noexcept
 {
     if (inst < 0 || inst >= 16)
         return false;
-    Mutex_Lock(MPQueueLock);
+    QueueLock(MPQueueLock);
     const bool ready = PacketSignalCount[inst] > 0;
-    Mutex_Unlock(MPQueueLock);
+    QueueUnlock(MPQueueLock);
     return ready;
 }
 
@@ -389,11 +437,11 @@ bool LocalMP::RepliesReady(int inst) noexcept
 {
     if (inst < 0 || inst >= 16)
         return false;
-    Mutex_Lock(MPQueueLock);
+    QueueLock(MPQueueLock);
     const u16 connected = MPStatus.ConnectedBitmask;
     const u16 others = connected & ~(1 << inst);
     const bool ready = others == 0 || ReplySignalCount[inst] > 0;
-    Mutex_Unlock(MPQueueLock);
+    QueueUnlock(MPQueueLock);
     return ready;
 }
 #endif
@@ -412,13 +460,13 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
 
     for (;;)
     {
-        if (!Semaphore_TryWait(SemPool[16+inst], RecvTimeout))
+        if (!TryWaitSignal(SemPool[16 + inst], ReplySignalCount[inst], RecvTimeout))
         {
             // no more replies available
             return ret;
         }
 
-        Mutex_Lock(MPQueueLock);
+        QueueLock(MPQueueLock);
 
         if (ReplySignalCount[inst] > 0)
             --ReplySignalCount[inst];
@@ -430,9 +478,9 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
         {
             Log(LogLevel::Warn, "REPLY FIFO OVERFLOW\n");
             ReplyReadOffset[inst] = MPStatus.ReplyWriteOffset;
-            Semaphore_Reset(SemPool[16 + inst]);
+            ResetSignal(SemPool[16 + inst]);
             ReplySignalCount[inst] = 0;
-            Mutex_Unlock(MPQueueLock);
+            QueueUnlock(MPQueueLock);
             return 0;
         }
 
@@ -444,7 +492,7 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
             if (ReplyReadOffset[inst] >= kReplyQueueSize)
                 ReplyReadOffset[inst] -= kReplyQueueSize;
 
-            Mutex_Unlock(MPQueueLock);
+            QueueUnlock(MPQueueLock);
             continue;
         }
 
@@ -461,11 +509,11 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
         {
             // all the clients have sent their reply
 
-            Mutex_Unlock(MPQueueLock);
+            QueueUnlock(MPQueueLock);
             return ret;
         }
 
-        Mutex_Unlock(MPQueueLock);
+        QueueUnlock(MPQueueLock);
     }
 }
 
@@ -474,7 +522,7 @@ std::vector<u8> LocalMP::SerializeState()
     std::vector<u8> output;
     output.reserve(8 + 18 + (16 * 4 * 4) + kPacketQueueSize + kReplyQueueSize);
 
-    Mutex_Lock(MPQueueLock);
+    QueueLock(MPQueueLock);
     Append32(output, LocalMPStateMagic);
     Append32(output, LocalMPStateVersion);
     Append16(output, MPStatus.ConnectedBitmask);
@@ -489,7 +537,7 @@ std::vector<u8> LocalMP::SerializeState()
     for (u32 value : ReplySignalCount) Append32(output, value);
     output.insert(output.end(), MPPacketQueue, MPPacketQueue + kPacketQueueSize);
     output.insert(output.end(), MPReplyQueue, MPReplyQueue + kReplyQueueSize);
-    Mutex_Unlock(MPQueueLock);
+    QueueUnlock(MPQueueLock);
 
     return output;
 }
@@ -544,7 +592,7 @@ bool LocalMP::DeserializeState(const u8* data, std::size_t length)
             return false;
     }
 
-    Mutex_Lock(MPQueueLock);
+    QueueLock(MPQueueLock);
     MPStatus = status;
     LastHostID = lastHost == std::numeric_limits<u32>::max() ? -1 : static_cast<int>(lastHost);
     std::copy(packetRead.begin(), packetRead.end(), PacketReadOffset);
@@ -555,14 +603,14 @@ bool LocalMP::DeserializeState(const u8* data, std::size_t length)
     std::copy(replyQueue.begin(), replyQueue.end(), MPReplyQueue);
     for (int index = 0; index < 16; ++index)
     {
-        Semaphore_Reset(SemPool[index]);
-        Semaphore_Reset(SemPool[16 + index]);
+        ResetSignal(SemPool[index]);
+        ResetSignal(SemPool[16 + index]);
         for (u32 signal = 0; signal < PacketSignalCount[index]; ++signal)
-            Semaphore_Post(SemPool[index]);
+            PostSignal(SemPool[index]);
         for (u32 signal = 0; signal < ReplySignalCount[index]; ++signal)
-            Semaphore_Post(SemPool[16 + index]);
+            PostSignal(SemPool[16 + index]);
     }
-    Mutex_Unlock(MPQueueLock);
+    QueueUnlock(MPQueueLock);
     return true;
 }
 

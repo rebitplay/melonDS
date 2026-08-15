@@ -73,27 +73,40 @@ void SoftRenderer::Stop()
 void SoftRenderer::PreSavestate()
 {
     auto rend3d = dynamic_cast<SoftRenderer3D*>(Rend3D.get());
-    if (rend3d->IsThreaded())
+    if (RenderingCurrentFrame && rend3d->IsThreaded())
         rend3d->SetupRenderThread();
+    rend3d->InvalidateTextureCache();
 }
 
 void SoftRenderer::PostSavestate()
 {
     auto rend3d = dynamic_cast<SoftRenderer3D*>(Rend3D.get());
-    if (rend3d->IsThreaded())
+    if (RenderingCurrentFrame && rend3d->IsThreaded())
         rend3d->EnableRenderThread();
 }
 
 
 void SoftRenderer::SetRenderSettings(RendererSettings& settings)
 {
+    ThreadedOutput = settings.Threaded;
     auto rend3d = dynamic_cast<SoftRenderer3D*>(Rend3D.get());
-    rend3d->SetThreaded(settings.Threaded);
+    rend3d->SetThreaded(OutputEnabled && ThreadedOutput);
+}
+
+void SoftRenderer::SetOutputEnabled(bool enabled)
+{
+    if (OutputEnabled == enabled)
+        return;
+    OutputEnabled = enabled;
+    auto rend3d = dynamic_cast<SoftRenderer3D*>(Rend3D.get());
+    rend3d->SetThreaded(OutputEnabled && ThreadedOutput);
 }
 
 
 void SoftRenderer::DrawScanline(u32 line)
 {
+    if (!RenderingCurrentFrame)
+        return;
     u32 *dstA, *dstB;
     u32 dstoffset = 256 * line;
     if (GPU.ScreenSwap)
@@ -157,8 +170,32 @@ void SoftRenderer::DrawScanline(u32 line)
     }
 }
 
+void SoftRenderer::Start3DRendering()
+{
+    // Hidden consoles still emulate their full GPU command stream. Rasterize
+    // pixels only when the local seat needs them or when DS display capture
+    // will feed those pixels back into emulated VRAM.
+    RenderingCurrentFrame = OutputEnabled || (GPU.CaptureCnt & (1U << 31)) != 0;
+    if (RenderingCurrentFrame)
+        Renderer::Start3DRendering();
+}
+
+void SoftRenderer::Finish3DRendering()
+{
+    if (RenderingCurrentFrame)
+        Renderer::Finish3DRendering();
+}
+
+void SoftRenderer::Restart3DRendering()
+{
+    if (RenderingCurrentFrame)
+        Renderer::Restart3DRendering();
+}
+
 void SoftRenderer::DrawSprites(u32 line)
 {
+    if (!RenderingCurrentFrame)
+        return;
     Rend2D_A->DrawSprites(line);
     Rend2D_B->DrawSprites(line);
 }

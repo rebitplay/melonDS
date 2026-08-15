@@ -20,6 +20,7 @@
 
 #include "GPU.h"
 #include "GPU3D.h"
+#include "GPU3D_Texcache.h"
 #include "Platform.h"
 #include <thread>
 #include <atomic>
@@ -27,6 +28,16 @@
 namespace melonDS
 {
 class SoftRenderer;
+
+class SoftTextureCacheLoader
+{
+public:
+    u32* GenerateTexture(u32 width, u32 height, u32 layers) const;
+    void UploadTexture(u32* texture, u32 width, u32 height, u32 layer, void* data) const;
+    void DeleteTexture(u32* texture) const;
+};
+
+using SoftTextureCache = Texcache<SoftTextureCacheLoader, u32*>;
 
 class SoftRenderer3D : public Renderer3D
 {
@@ -47,6 +58,7 @@ public:
     void SetupRenderThread();
     void EnableRenderThread();
     void StopRenderThread();
+    void InvalidateTextureCache();
 
 private:
     SoftRenderer& Parent;
@@ -436,6 +448,10 @@ private:
     {
         Polygon* PolyData;
 
+        const u32* TextureData;
+        u32 TextureWidth;
+        u32 TextureHeight;
+
         Slope<0> SlopeL;
         Slope<1> SlopeR;
         s32 XL, XR;
@@ -446,14 +462,16 @@ private:
 
     RendererPolygon PolygonList[2048];
     void TextureLookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const;
-    u32 RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const;
+    [[gnu::always_inline]] u32 CachedTextureLookup(const RendererPolygon* rp, s16 s, s16 t) const;
+    [[gnu::always_inline]] u32 RenderPixel(const RendererPolygon* rp, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const;
     void PlotTranslucentPixel(u32 pixeladdr, u32 color, u32 z, u32 polyattr, u32 shadow);
     void SetupPolygonLeftEdge(RendererPolygon* rp, s32 y) const;
     void SetupPolygonRightEdge(RendererPolygon* rp, s32 y) const;
-    void SetupPolygon(RendererPolygon* rp, Polygon* polygon) const;
-    void RenderShadowMaskScanline(RendererPolygon* rp, s32 y);
-    void RenderPolygonScanline(RendererPolygon* rp, s32 y);
-    void RenderScanline(s32 y, int npolys);
+    void SetupPolygon(RendererPolygon* rp, Polygon* polygon);
+    int SetupPolygonList(RendererPolygon* list, Polygon** polygons, int npolys, s32 startY);
+    void RenderShadowMaskScanline(RendererPolygon* rp, s32 y, bool& previousWasShadowMask);
+    void RenderPolygonScanline(RendererPolygon* rp, s32 y, bool& previousWasShadowMask);
+    void RenderScanline(RendererPolygon* list, s32 y, int npolys);
     u32 CalculateFogDensity(u32 pixeladdr) const;
     void ScanlineFinalPass(s32 y);
     void ClearBuffers();
@@ -485,8 +503,9 @@ private:
     // bit22: translucent flag
     // bit24-29: polygon ID for opaque pixels
 
-    u8 StencilBuffer[256*2];
-    bool PrevIsShadowMask;
+    u8 StencilBuffer[256*192];
+
+    SoftTextureCache TextureCache;
 
     bool Enabled;
 
@@ -510,5 +529,6 @@ private:
     // Used to allow the main thread to read some scanlines
     // before (the 3D portion of) the entire frame is rasterized.
     Platform::Semaphore* Sema_ScanlineCount;
+
 };
 }

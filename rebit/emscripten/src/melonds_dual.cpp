@@ -51,7 +51,13 @@ constexpr int AudioScratchFrames = 4096;
 // LocalMP calls are cooperatively ordered below, so receive operations must
 // never make correctness depend on a host scheduler or wall-clock timeout.
 constexpr int LocalMultiplayerReceiveTimeoutMs = 0;
-constexpr int MultiplayerProgressSpinYields = 8;
+// The Wi-Fi device polls empty receive queues dozens of times per video frame.
+// Switching pthreads after each poll is especially expensive in WebAssembly.
+// A fixed batch keeps the schedule implementation-neutral and deterministic
+// while still handing packet-producing operations to the next console at once.
+constexpr int MultiplayerPacketReceivePollBatch = 4;
+constexpr int MultiplayerHostReceivePollBatch = 4;
+constexpr int MultiplayerProgressSpins = 8;
 constexpr auto MultiplayerFrameWatchdog = std::chrono::seconds(2);
 constexpr auto MultiplayerRecoveryWatchdog = std::chrono::seconds(5);
 constexpr std::uint32_t CheckpointMagic = 0x53444E52; // "RNDS" in little endian.
@@ -80,6 +86,8 @@ struct Slot
     InputState input;
     std::array<std::uint32_t, ScreenWidth * CombinedHeight> framebuffer {};
     std::uint64_t observedGeneration = 0;
+    int multiplayerPacketReceivePolls = 0;
+    int multiplayerHostReceivePolls = 0;
 };
 
 struct Runtime
@@ -126,7 +134,9 @@ int NextMultiplayerTurn(int current, std::uint32_t doneMask)
 void NotifyMultiplayerProgress()
 {
     State.multiplayerProgressSequence.fetch_add(1, std::memory_order_release);
+#ifndef __EMSCRIPTEN__
     State.multiplayerProgressSequence.notify_all();
+#endif
 }
 
 void WaitForMultiplayerProgress(std::uint32_t observedSequence)
@@ -134,10 +144,17 @@ void WaitForMultiplayerProgress(std::uint32_t observedSequence)
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     (void)observedSequence;
 #else
+#ifdef __EMSCRIPTEN__
+    while (State.multiplayerFrameActive.load(std::memory_order_acquire)
+        && State.multiplayerProgressSequence.load(std::memory_order_acquire) == observedSequence)
+    {
+    }
+    return;
+#else
     // Most LocalMP turns are handed off within a few scheduler yields. Keep
     // that fast path lock-free, but bound it so a delayed browser worker
     // always falls back to the lossless sequence wait below.
-    for (int attempt = 0; attempt < MultiplayerProgressSpinYields; ++attempt)
+    for (int attempt = 0; attempt < MultiplayerProgressSpins; ++attempt)
     {
         if (State.multiplayerProgressSequence.load(std::memory_order_acquire) != observedSequence)
             return;
@@ -147,10 +164,16 @@ void WaitForMultiplayerProgress(std::uint32_t observedSequence)
     // a fixed wall-clock delay. It also maps directly to the browser futex.
     State.multiplayerProgressSequence.wait(observedSequence, std::memory_order_acquire);
 #endif
+#endif
 }
 
 void BeginMultiplayerFrame()
 {
+    for (const auto& slot : State.slots)
+    {
+        slot->multiplayerPacketReceivePolls = 0;
+        slot->multiplayerHostReceivePolls = 0;
+    }
     State.multiplayerDoneMask.store(0, std::memory_order_release);
     State.multiplayerTurn.store(State.slots.empty() ? -1 : 0, std::memory_order_release);
     State.multiplayerFrameActive.store(!State.slots.empty(), std::memory_order_release);
@@ -195,7 +218,7 @@ void ApplySchedulerJitter(SlotContext& context)
     const std::uint32_t profile = State.schedulerJitterProfile.load(std::memory_order_relaxed);
     if (profile == 0)
         return;
-    const std::uint64_t call = context.multiplayerCalls.fetch_add(1, std::memory_order_relaxed);
+    const std::uint64_t call = context.multiplayerCalls++;
     std::uint32_t value = profile ^ (static_cast<std::uint32_t>(context.id) * 0x9E3779B9U)
         ^ (static_cast<std::uint32_t>(call) * 0x85EBCA6BU);
     value ^= value >> 16;
@@ -321,13 +344,13 @@ bool ExportCheckpoint()
         Append32(checkpoint, slot->input.touching ? 1U : 0U);
         Append32(checkpoint, slot->input.touchX);
         Append32(checkpoint, slot->input.touchY);
-        Append64(checkpoint, slot->context.packetsSent.load(std::memory_order_relaxed));
-        Append64(checkpoint, slot->context.packetsReceived.load(std::memory_order_relaxed));
-        Append64(checkpoint, slot->context.commands.load(std::memory_order_relaxed));
-        Append64(checkpoint, slot->context.replies.load(std::memory_order_relaxed));
-        Append64(checkpoint, slot->context.multiplayerCalls.load(std::memory_order_relaxed));
-        Append64(checkpoint, slot->context.replyBaseline.load(std::memory_order_relaxed));
-        Append32(checkpoint, slot->context.awaitingReplies.load(std::memory_order_relaxed) ? 1U : 0U);
+        Append64(checkpoint, slot->context.packetsSent);
+        Append64(checkpoint, slot->context.packetsReceived);
+        Append64(checkpoint, slot->context.commands);
+        Append64(checkpoint, slot->context.replies);
+        Append64(checkpoint, slot->context.multiplayerCalls);
+        Append64(checkpoint, slot->context.replyBaseline);
+        Append32(checkpoint, slot->context.awaitingReplies ? 1U : 0U);
 
         melonDS::Savestate state;
         if (state.Error || !slot->console->DoSavestate(&state) || state.Error || state.Length() > MaximumConsoleStateBytes)
@@ -464,13 +487,13 @@ bool ImportCheckpoint(std::uint8_t* data, std::uint32_t length)
     {
         auto& slot = *State.slots[player];
         slot.input = slots[player].input;
-        slot.context.packetsSent.store(slots[player].counters[0], std::memory_order_relaxed);
-        slot.context.packetsReceived.store(slots[player].counters[1], std::memory_order_relaxed);
-        slot.context.commands.store(slots[player].counters[2], std::memory_order_relaxed);
-        slot.context.replies.store(slots[player].counters[3], std::memory_order_relaxed);
-        slot.context.multiplayerCalls.store(slots[player].counters[4], std::memory_order_relaxed);
-        slot.context.replyBaseline.store(slots[player].replyBaseline, std::memory_order_relaxed);
-        slot.context.awaitingReplies.store(slots[player].awaitingReplies, std::memory_order_relaxed);
+        slot.context.packetsSent = slots[player].counters[0];
+        slot.context.packetsReceived = slots[player].counters[1];
+        slot.context.commands = slots[player].counters[2];
+        slot.context.replies = slots[player].counters[3];
+        slot.context.multiplayerCalls = slots[player].counters[4];
+        slot.context.replyBaseline = slots[player].replyBaseline;
+        slot.context.awaitingReplies = slots[player].awaitingReplies;
         CopyFramebuffer(slot);
     }
     State.multiplayerReplySequence.store(replySequence, std::memory_order_release);
@@ -670,10 +693,9 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
         .HiresCoordinates = false,
         .BetterPolygons = false,
     };
+    console->GetRenderer().SetOutputEnabled(slot.context.id == State.visiblePlayer);
     console->GetRenderer().SetRenderSettings(rendererSettings);
-#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     console->SPU.SetOutputEnabled(slot.context.id == State.visiblePlayer);
-#endif
     console->Start();
     return console;
 }
@@ -729,7 +751,6 @@ bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexce
     if (!context || player < 0 || player >= static_cast<int>(State.slots.size()))
         return false;
     ApplySchedulerJitter(*context);
-
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     (void)operation;
     // The cooperative runtime invokes exactly one console at a time. Every
@@ -741,10 +762,10 @@ bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexce
 #else
 
     const std::uint32_t playerBit = 1U << player;
-    if (operation == MultiplayerOperation::RecvReplies
-        && context->awaitingReplies.exchange(false, std::memory_order_acq_rel))
+    if (operation == MultiplayerOperation::RecvReplies && context->awaitingReplies)
     {
-        const std::uint64_t baseline = context->replyBaseline.load(std::memory_order_acquire);
+        context->awaitingReplies = false;
+        const std::uint64_t baseline = context->replyBaseline;
         const std::uint32_t allPlayersMask = (1U << State.slots.size()) - 1U;
         const std::uint32_t otherPlayersMask = allPlayersMask & ~playerBit;
         while (State.multiplayerFrameActive.load(std::memory_order_acquire)
@@ -784,6 +805,40 @@ bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexce
 #endif
 }
 
+bool DeferMultiplayerReceivePoll(void* userdata, MultiplayerOperation operation) noexcept
+{
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    (void)userdata;
+    (void)operation;
+    return false;
+#else
+    const int player = InstanceId(userdata);
+    if (!State.multiplayerFrameActive.load(std::memory_order_acquire)
+        || player < 0
+        || player >= static_cast<int>(State.slots.size()))
+        return false;
+    auto& slot = *State.slots[player];
+    int* polls = nullptr;
+    int batch = 0;
+    if (operation == MultiplayerOperation::RecvPacket)
+    {
+        polls = &slot.multiplayerPacketReceivePolls;
+        batch = MultiplayerPacketReceivePollBatch;
+    }
+    else if (operation == MultiplayerOperation::RecvHostPacket)
+    {
+        polls = &slot.multiplayerHostReceivePolls;
+        batch = MultiplayerHostReceivePollBatch;
+    }
+    if (!polls)
+        return false;
+    if (++*polls < batch)
+        return true;
+    *polls = 0;
+    return false;
+#endif
+}
+
 void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept
 {
     if (!scheduled)
@@ -810,8 +865,8 @@ void NoteMultiplayerCommand(void* userdata) noexcept
     auto* context = Context(userdata);
     if (!context)
         return;
-    context->replyBaseline.store(State.multiplayerReplySequence.load(std::memory_order_acquire), std::memory_order_release);
-    context->awaitingReplies.store(true, std::memory_order_release);
+    context->replyBaseline = State.multiplayerReplySequence.load(std::memory_order_acquire);
+    context->awaitingReplies = true;
 }
 
 void NoteMultiplayerReply() noexcept
@@ -927,10 +982,11 @@ REBIT_EXPORT void md_set_visible_player(int player)
     if (rebit::GetSlot(player))
     {
         rebit::State.visiblePlayer = player;
-#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
         for (const auto& slot : rebit::State.slots)
+        {
+            slot->console->GetRenderer().SetOutputEnabled(slot->context.id == player);
             slot->console->SPU.SetOutputEnabled(slot->context.id == player);
-#endif
+        }
     }
 }
 
@@ -987,9 +1043,6 @@ REBIT_EXPORT int md_run_frame()
         }
     }
 #endif
-
-    if (auto* visible = GetSlot(State.visiblePlayer))
-        CopyFramebuffer(*visible);
 
     State.lastFrameMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     return 1;
@@ -1118,25 +1171,25 @@ REBIT_EXPORT std::uint32_t md_state_hash()
 REBIT_EXPORT std::uint32_t md_mp_packets_sent(int player)
 {
     auto* slot = rebit::GetSlot(player);
-    return slot ? static_cast<std::uint32_t>(slot->context.packetsSent.load()) : 0;
+    return slot ? static_cast<std::uint32_t>(slot->context.packetsSent) : 0;
 }
 
 REBIT_EXPORT std::uint32_t md_mp_packets_received(int player)
 {
     auto* slot = rebit::GetSlot(player);
-    return slot ? static_cast<std::uint32_t>(slot->context.packetsReceived.load()) : 0;
+    return slot ? static_cast<std::uint32_t>(slot->context.packetsReceived) : 0;
 }
 
 REBIT_EXPORT std::uint32_t md_mp_commands(int player)
 {
     auto* slot = rebit::GetSlot(player);
-    return slot ? static_cast<std::uint32_t>(slot->context.commands.load()) : 0;
+    return slot ? static_cast<std::uint32_t>(slot->context.commands) : 0;
 }
 
 REBIT_EXPORT std::uint32_t md_mp_replies(int player)
 {
     auto* slot = rebit::GetSlot(player);
-    return slot ? static_cast<std::uint32_t>(slot->context.replies.load()) : 0;
+    return slot ? static_cast<std::uint32_t>(slot->context.replies) : 0;
 }
 
 REBIT_EXPORT double md_last_frame_ms()

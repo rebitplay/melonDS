@@ -384,6 +384,8 @@ int MP_SendPacket(u8* data, int length, u64 timestamp, void* userdata)
 
 int MP_RecvPacket(u8* data, u64* timestamp, void* userdata)
 {
+    if (rebit::DeferMultiplayerReceivePoll(userdata, rebit::MultiplayerOperation::RecvPacket))
+        return 0;
     ScheduledMultiplayerCall scheduled(userdata, rebit::MultiplayerOperation::RecvPacket);
     auto* multiplayer = rebit::LocalMultiplayer();
     const int received = multiplayer ? multiplayer->RecvPacket(rebit::InstanceId(userdata), data, timestamp) : 0;
@@ -438,6 +440,8 @@ int MP_SendAck(u8* data, int length, u64 timestamp, void* userdata)
 
 int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata)
 {
+    if (rebit::DeferMultiplayerReceivePoll(userdata, rebit::MultiplayerOperation::RecvHostPacket))
+        return 0;
     ScheduledMultiplayerCall scheduled(userdata, rebit::MultiplayerOperation::RecvHostPacket);
     auto* multiplayer = rebit::LocalMultiplayer();
     const int received = multiplayer ? multiplayer->RecvHostPacket(rebit::InstanceId(userdata), data, timestamp) : 0;

@@ -426,6 +426,99 @@ protected:
 namespace ARMInterpreter
 {
 
+namespace Fast
+{
+
+inline ARMv5* AsARM9(ARM* cpu) noexcept
+{
+    return static_cast<ARMv5*>(cpu);
+}
+
+inline ARMv4* AsARM7(ARM* cpu) noexcept
+{
+    return static_cast<ARMv4*>(cpu);
+}
+
+inline void DataRead8(ARM* cpu, u32 addr, u32* value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataRead8(addr, value);
+    else AsARM7(cpu)->ARMv4::DataRead8(addr, value);
+}
+
+inline void DataRead16(ARM* cpu, u32 addr, u32* value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataRead16(addr, value);
+    else AsARM7(cpu)->ARMv4::DataRead16(addr, value);
+}
+
+inline void DataRead32(ARM* cpu, u32 addr, u32* value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataRead32(addr, value);
+    else AsARM7(cpu)->ARMv4::DataRead32(addr, value);
+}
+
+inline void DataRead32S(ARM* cpu, u32 addr, u32* value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataRead32S(addr, value);
+    else AsARM7(cpu)->ARMv4::DataRead32S(addr, value);
+}
+
+inline void DataWrite8(ARM* cpu, u32 addr, u8 value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataWrite8(addr, value);
+    else AsARM7(cpu)->ARMv4::DataWrite8(addr, value);
+}
+
+inline void DataWrite16(ARM* cpu, u32 addr, u16 value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataWrite16(addr, value);
+    else AsARM7(cpu)->ARMv4::DataWrite16(addr, value);
+}
+
+inline void DataWrite32(ARM* cpu, u32 addr, u32 value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataWrite32(addr, value);
+    else AsARM7(cpu)->ARMv4::DataWrite32(addr, value);
+}
+
+inline void DataWrite32S(ARM* cpu, u32 addr, u32 value)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::DataWrite32S(addr, value);
+    else AsARM7(cpu)->ARMv4::DataWrite32S(addr, value);
+}
+
+inline void AddCyclesC(ARM* cpu)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::AddCycles_C();
+    else AsARM7(cpu)->ARMv4::AddCycles_C();
+}
+
+inline void AddCyclesCI(ARM* cpu, s32 cycles)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::AddCycles_CI(cycles);
+    else AsARM7(cpu)->ARMv4::AddCycles_CI(cycles);
+}
+
+inline void AddCyclesCDI(ARM* cpu)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::AddCycles_CDI();
+    else AsARM7(cpu)->ARMv4::AddCycles_CDI();
+}
+
+inline void AddCyclesCD(ARM* cpu)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::AddCycles_CD();
+    else AsARM7(cpu)->ARMv4::AddCycles_CD();
+}
+
+inline void JumpTo(ARM* cpu, u32 address, bool restoreCpsr = false)
+{
+    if (cpu->Num == 0) AsARM9(cpu)->ARMv5::JumpTo(address, restoreCpsr);
+    else AsARM7(cpu)->ARMv4::JumpTo(address, restoreCpsr);
+}
+
+}
+
 void A_UNK(ARM* cpu);
 void T_UNK(ARM* cpu);
 

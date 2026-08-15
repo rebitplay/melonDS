@@ -27,21 +27,41 @@
 namespace melonDS
 {
 
-void RenderThreadFunc();
+u32* SoftTextureCacheLoader::GenerateTexture(u32 width, u32 height, u32 layers) const
+{
+    return new u32[static_cast<std::size_t>(width) * height * layers];
+}
+
+void SoftTextureCacheLoader::UploadTexture(
+    u32* texture,
+    u32 width,
+    u32 height,
+    u32 layer,
+    void* data) const
+{
+    const std::size_t pixels = static_cast<std::size_t>(width) * height;
+    memcpy(texture + pixels * layer, data, pixels * sizeof(u32));
+}
+
+void SoftTextureCacheLoader::DeleteTexture(u32* texture) const
+{
+    delete[] texture;
+}
 
 
 void SoftRenderer3D::StopRenderThread()
 {
-    if (RenderThreadRunning.load(std::memory_order_relaxed))
+    const bool renderRunning = RenderThreadRunning.exchange(false, std::memory_order_relaxed);
+    if (renderRunning)
     {
-        // Tell the render thread to stop drawing new frames, and finish up the current one.
-        RenderThreadRunning = false;
-
         Platform::Semaphore_Post(Sema_RenderStart);
 
-        Platform::Thread_Wait(RenderThread);
-        Platform::Thread_Free(RenderThread);
-        RenderThread = nullptr;
+        if (RenderThread)
+        {
+            Platform::Thread_Wait(RenderThread);
+            Platform::Thread_Free(RenderThread);
+            RenderThread = nullptr;
+        }
     }
 }
 
@@ -96,7 +116,7 @@ void SoftRenderer3D::EnableRenderThread()
 }
 
 SoftRenderer3D::SoftRenderer3D(melonDS::GPU3D& gpu3D, SoftRenderer& parent) noexcept
-    : Renderer3D(gpu3D), Parent(parent)
+    : Renderer3D(gpu3D), Parent(parent), TextureCache(gpu3D.GPU, SoftTextureCacheLoader {})
 {
     Sema_RenderStart = Platform::Semaphore_Create();
     Sema_RenderDone = Platform::Semaphore_Create();
@@ -110,6 +130,7 @@ SoftRenderer3D::SoftRenderer3D(melonDS::GPU3D& gpu3D, SoftRenderer& parent) noex
 SoftRenderer3D::~SoftRenderer3D()
 {
     StopRenderThread();
+    TextureCache.Reset();
 
     Platform::Semaphore_Free(Sema_RenderStart);
     Platform::Semaphore_Free(Sema_RenderDone);
@@ -118,14 +139,18 @@ SoftRenderer3D::~SoftRenderer3D()
 
 void SoftRenderer3D::Reset()
 {
+    TextureCache.Reset();
     memset(ColorBuffer, 0, BufferSize * 2 * 4);
     memset(DepthBuffer, 0, BufferSize * 2 * 4);
     memset(AttrBuffer, 0, BufferSize * 2 * 4);
 
-    PrevIsShadowMask = false;
-
     SetupRenderThread();
     EnableRenderThread();
+}
+
+void SoftRenderer3D::InvalidateTextureCache()
+{
+    TextureCache.Reset();
 }
 
 void SoftRenderer3D::SetThreaded(bool threaded) noexcept
@@ -424,6 +449,34 @@ bool DepthTest_LessThan_FrontFacing(s32 dstz, s32 z, u32 dstattr)
     return false;
 }
 
+enum class DepthTestMode : u8
+{
+    EqualZ,
+    EqualW,
+    LessThan,
+    LessThanFrontFacing,
+};
+
+[[gnu::always_inline]] inline bool RunDepthTest(
+    DepthTestMode mode,
+    s32 dstz,
+    s32 z,
+    u32 dstattr) noexcept
+{
+    switch (mode)
+    {
+    case DepthTestMode::EqualZ:
+        return DepthTest_Equal_Z(dstz, z, dstattr);
+    case DepthTestMode::EqualW:
+        return DepthTest_Equal_W(dstz, z, dstattr);
+    case DepthTestMode::LessThanFrontFacing:
+        return DepthTest_LessThan_FrontFacing(dstz, z, dstattr);
+    case DepthTestMode::LessThan:
+        return DepthTest_LessThan(dstz, z, dstattr);
+    }
+    return false;
+}
+
 u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noexcept
 {
     u32 dstalpha = dstcolor >> 24;
@@ -454,8 +507,56 @@ u32 SoftRenderer3D::AlphaBlend(u32 srccolor, u32 dstcolor, u32 alpha) const noex
     return srcR | (srcG << 8) | (srcB << 16) | (dstalpha << 24);
 }
 
-u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const
+[[gnu::always_inline]] inline u32 SoftRenderer3D::CachedTextureLookup(
+    const RendererPolygon* rp,
+    s16 s,
+    s16 t) const
 {
+    const u32 texparam = rp->PolyData->TexParam;
+    const s32 width = static_cast<s32>(rp->TextureWidth);
+    const s32 height = static_cast<s32>(rp->TextureHeight);
+
+    s >>= 4;
+    t >>= 4;
+
+    if (texparam & (1 << 16))
+    {
+        if (texparam & (1 << 18))
+            s = (s & width) ? (width - 1) - (s & (width - 1)) : (s & (width - 1));
+        else
+            s &= width - 1;
+    }
+    else
+    {
+        if (s < 0) s = 0;
+        else if (s >= width) s = width - 1;
+    }
+
+    if (texparam & (1 << 17))
+    {
+        if (texparam & (1 << 19))
+            t = (t & height) ? (height - 1) - (t & (height - 1)) : (t & (height - 1));
+        else
+            t &= height - 1;
+    }
+    else
+    {
+        if (t < 0) t = 0;
+        else if (t >= height) t = height - 1;
+    }
+
+    return rp->TextureData[static_cast<std::size_t>(t) * rp->TextureWidth + s];
+}
+
+[[gnu::always_inline]] inline u32 SoftRenderer3D::RenderPixel(
+    const RendererPolygon* rp,
+    u8 vr,
+    u8 vg,
+    u8 vb,
+    s16 s,
+    s16 t) const
+{
+    const Polygon* polygon = rp->PolyData;
     u8 r, g, b, a;
 
     u32 blendmode = (polygon->Attr >> 4) & 0x3;
@@ -488,14 +589,23 @@ u32 SoftRenderer3D::RenderPixel(const Polygon* polygon, u8 vr, u8 vg, u8 vb, s16
 
     if ((GPU3D.RenderDispCnt & (1<<0)) && (((polygon->TexParam >> 26) & 0x7) != 0))
     {
-        u8 tr, tg, tb;
-
-        u16 tcolor; u8 talpha;
-        TextureLookup(polygon->TexParam, polygon->TexPalette, s, t, &tcolor, &talpha);
-
-        tr = (tcolor << 1) & 0x3E; if (tr) tr++;
-        tg = (tcolor >> 4) & 0x3E; if (tg) tg++;
-        tb = (tcolor >> 9) & 0x3E; if (tb) tb++;
+        u8 tr, tg, tb, talpha;
+        if (rp->TextureData)
+        {
+            const u32 texel = CachedTextureLookup(rp, s, t);
+            tr = texel & 0x3F;
+            tg = (texel >> 8) & 0x3F;
+            tb = (texel >> 16) & 0x3F;
+            talpha = texel >> 24;
+        }
+        else
+        {
+            u16 tcolor;
+            TextureLookup(polygon->TexParam, polygon->TexPalette, s, t, &tcolor, &talpha);
+            tr = (tcolor << 1) & 0x3E; if (tr) tr++;
+            tg = (tcolor >> 4) & 0x3E; if (tg) tg++;
+            tb = (tcolor >> 9) & 0x3E; if (tb) tb++;
+        }
 
         if (blendmode & 0x1)
         {
@@ -655,7 +765,7 @@ void SoftRenderer3D::SetupPolygonRightEdge(SoftRenderer3D::RendererPolygon* rp, 
                               polygon->FinalW[rp->CurVR], polygon->FinalW[rp->NextVR], y, polygon->WBuffer);
 }
 
-void SoftRenderer3D::SetupPolygon(SoftRenderer3D::RendererPolygon* rp, Polygon* polygon) const
+void SoftRenderer3D::SetupPolygon(SoftRenderer3D::RendererPolygon* rp, Polygon* polygon)
 {
     u32 nverts = polygon->NumVertices;
 
@@ -663,6 +773,20 @@ void SoftRenderer3D::SetupPolygon(SoftRenderer3D::RendererPolygon* rp, Polygon* 
     s32 ytop = polygon->YTop, ybot = polygon->YBottom;
 
     rp->PolyData = polygon;
+    rp->TextureData = nullptr;
+    rp->TextureWidth = 0;
+    rp->TextureHeight = 0;
+
+    if (((polygon->TexParam >> 26) & 0x7) != 0)
+    {
+        u32* texture = nullptr;
+        u32 layer = 0;
+        u32* helper = nullptr;
+        TextureCache.GetTexture(polygon->TexParam, polygon->TexPalette, texture, layer, helper);
+        rp->TextureWidth = TextureWidth(polygon->TexParam);
+        rp->TextureHeight = TextureHeight(polygon->TexParam);
+        rp->TextureData = texture + (static_cast<std::size_t>(layer) * rp->TextureWidth * rp->TextureHeight);
+    }
 
     rp->CurVL = vtop;
     rp->CurVR = vtop;
@@ -708,7 +832,36 @@ void SoftRenderer3D::SetupPolygon(SoftRenderer3D::RendererPolygon* rp, Polygon* 
     }
 }
 
-void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
+int SoftRenderer3D::SetupPolygonList(
+    RendererPolygon* list,
+    Polygon** polygons,
+    int npolys,
+    s32 startY)
+{
+    int count = 0;
+    for (int i = 0; i < npolys; ++i)
+    {
+        Polygon* polygon = polygons[i];
+        if (polygon->Degenerate)
+            continue;
+
+        RendererPolygon* rp = &list[count++];
+        SetupPolygon(rp, polygon);
+        if (polygon->YTop != polygon->YBottom
+            && startY > polygon->YTop
+            && startY < polygon->YBottom)
+        {
+            SetupPolygonLeftEdge(rp, startY);
+            SetupPolygonRightEdge(rp, startY);
+        }
+    }
+    return count;
+}
+
+void SoftRenderer3D::RenderShadowMaskScanline(
+    RendererPolygon* rp,
+    s32 y,
+    bool& previousWasShadowMask)
 {
     Polygon* polygon = rp->PolyData;
 
@@ -718,18 +871,18 @@ void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
     u32 polyalpha = (polygon->Attr >> 16) & 0x1F;
     bool wireframe = (polyalpha == 0);
 
-    bool (*fnDepthTest)(s32 dstz, s32 z, u32 dstattr);
+    DepthTestMode depthTestMode;
     if (polygon->Attr & (1<<14))
-        fnDepthTest = polygon->WBuffer ? DepthTest_Equal_W : DepthTest_Equal_Z;
+        depthTestMode = polygon->WBuffer ? DepthTestMode::EqualW : DepthTestMode::EqualZ;
     else if (polygon->FacingView)
-        fnDepthTest = DepthTest_LessThan_FrontFacing;
+        depthTestMode = DepthTestMode::LessThanFrontFacing;
     else
-        fnDepthTest = DepthTest_LessThan;
+        depthTestMode = DepthTestMode::LessThan;
 
-    if (!PrevIsShadowMask)
-        memset(&StencilBuffer[256 * (y&0x1)], 0, 256);
+    if (!previousWasShadowMask)
+        memset(&StencilBuffer[256 * y], 0, 256);
 
-    PrevIsShadowMask = true;
+    previousWasShadowMask = true;
 
     if (polygon->YTop != polygon->YBottom)
     {
@@ -869,14 +1022,14 @@ void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
         s32 z = interpX.InterpolateZ(zl, zr);
         u32 dstattr = AttrBuffer[pixeladdr];
 
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
-            StencilBuffer[256*(y&0x1) + x] = 1;
+        if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
+            StencilBuffer[256*y + x] = 1;
 
         if (dstattr & 0xF)
         {
             pixeladdr += BufferSize;
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
+            if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+                StencilBuffer[256*y + x] |= 0x2;
         }
     }
 
@@ -895,14 +1048,14 @@ void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
         s32 z = interpX.InterpolateZ(zl, zr);
         u32 dstattr = AttrBuffer[pixeladdr];
 
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
-            StencilBuffer[256*(y&0x1) + x] = 1;
+        if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
+            StencilBuffer[256*y + x] = 1;
 
         if (dstattr & 0xF)
         {
             pixeladdr += BufferSize;
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
+            if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+                StencilBuffer[256*y + x] |= 0x2;
         }
     }
 
@@ -921,14 +1074,14 @@ void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
         s32 z = interpX.InterpolateZ(zl, zr);
         u32 dstattr = AttrBuffer[pixeladdr];
 
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
-            StencilBuffer[256*(y&0x1) + x] = 1;
+        if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
+            StencilBuffer[256*y + x] = 1;
 
         if (dstattr & 0xF)
         {
             pixeladdr += BufferSize;
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
-                StencilBuffer[256*(y&0x1) + x] |= 0x2;
+            if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, AttrBuffer[pixeladdr]))
+                StencilBuffer[256*y + x] |= 0x2;
         }
     }
 
@@ -936,7 +1089,10 @@ void SoftRenderer3D::RenderShadowMaskScanline(RendererPolygon* rp, s32 y)
     rp->XR = rp->SlopeR.Step();
 }
 
-void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
+void SoftRenderer3D::RenderPolygonScanline(
+    RendererPolygon* rp,
+    s32 y,
+    bool& previousWasShadowMask)
 {
     Polygon* polygon = rp->PolyData;
 
@@ -946,15 +1102,15 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
     u32 polyalpha = (polygon->Attr >> 16) & 0x1F;
     bool wireframe = (polyalpha == 0);
 
-    bool (*fnDepthTest)(s32 dstz, s32 z, u32 dstattr);
+    DepthTestMode depthTestMode;
     if (polygon->Attr & (1<<14))
-        fnDepthTest = polygon->WBuffer ? DepthTest_Equal_W : DepthTest_Equal_Z;
+        depthTestMode = polygon->WBuffer ? DepthTestMode::EqualW : DepthTestMode::EqualZ;
     else if (polygon->FacingView)
-        fnDepthTest = DepthTest_LessThan_FrontFacing;
+        depthTestMode = DepthTestMode::LessThanFrontFacing;
     else
-        fnDepthTest = DepthTest_LessThan;
+        depthTestMode = DepthTestMode::LessThan;
 
-    PrevIsShadowMask = false;
+    previousWasShadowMask = false;
 
     if (polygon->YTop != polygon->YBottom)
     {
@@ -1122,7 +1278,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         // check stencil buffer for shadows
         if (polygon->IsShadow)
         {
-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
+            u8 stencil = StencilBuffer[256*y + x];
             if (!stencil)
                 continue;
             if (!(stencil & 0x1))
@@ -1137,13 +1293,13 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 
         // if depth test against the topmost pixel fails, test
         // against the pixel underneath
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+        if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
         {
             if (!(dstattr & 0xF) || pixeladdr >= BufferSize) continue;
 
             pixeladdr += BufferSize;
             dstattr = AttrBuffer[pixeladdr];
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+            if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
                 continue;
         }
 
@@ -1154,7 +1310,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = RenderPixel(rp, vr>>3, vg>>3, vb>>3, s, t);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1218,7 +1374,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         // check stencil buffer for shadows
         if (polygon->IsShadow)
         {
-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
+            u8 stencil = StencilBuffer[256*y + x];
             if (!stencil)
                 continue;
             if (!(stencil & 0x1))
@@ -1233,13 +1389,13 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 
         // if depth test against the topmost pixel fails, test
         // against the pixel underneath
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+        if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
         {
             if (!(dstattr & 0xF) || pixeladdr >= BufferSize) continue;
 
             pixeladdr += BufferSize;
             dstattr = AttrBuffer[pixeladdr];
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+            if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
                 continue;
         }
 
@@ -1250,7 +1406,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = RenderPixel(rp, vr>>3, vg>>3, vb>>3, s, t);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1310,7 +1466,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         // check stencil buffer for shadows
         if (polygon->IsShadow)
         {
-            u8 stencil = StencilBuffer[256*(y&0x1) + x];
+            u8 stencil = StencilBuffer[256*y + x];
             if (!stencil)
                 continue;
             if (!(stencil & 0x1))
@@ -1325,13 +1481,13 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
 
         // if depth test against the topmost pixel fails, test
         // against the pixel underneath
-        if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+        if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
         {
             if (!(dstattr & 0xF) || pixeladdr >= BufferSize) continue;
 
             pixeladdr += BufferSize;
             dstattr = AttrBuffer[pixeladdr];
-            if (!fnDepthTest(DepthBuffer[pixeladdr], z, dstattr))
+            if (!RunDepthTest(depthTestMode, DepthBuffer[pixeladdr], z, dstattr))
                 continue;
         }
 
@@ -1342,7 +1498,7 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
         s16 s = interpX.Interpolate(sl, sr);
         s16 t = interpX.Interpolate(tl, tr);
 
-        u32 color = RenderPixel(polygon, vr>>3, vg>>3, vb>>3, s, t);
+        u32 color = RenderPixel(rp, vr>>3, vg>>3, vb>>3, s, t);
         u8 alpha = color >> 24;
 
         // alpha test
@@ -1394,19 +1550,20 @@ void SoftRenderer3D::RenderPolygonScanline(RendererPolygon* rp, s32 y)
     rp->XR = rp->SlopeR.Step();
 }
 
-void SoftRenderer3D::RenderScanline(s32 y, int npolys)
+void SoftRenderer3D::RenderScanline(RendererPolygon* list, s32 y, int npolys)
 {
+    bool previousWasShadowMask = false;
     for (int i = 0; i < npolys; i++)
     {
-        RendererPolygon* rp = &PolygonList[i];
+        RendererPolygon* rp = &list[i];
         Polygon* polygon = rp->PolyData;
 
         if (y >= polygon->YTop && (y < polygon->YBottom || (y == polygon->YTop && polygon->YBottom == polygon->YTop)))
         {
             if (polygon->IsShadowMask)
-                RenderShadowMaskScanline(rp, y);
+                RenderShadowMaskScanline(rp, y, previousWasShadowMask);
             else
-                RenderPolygonScanline(rp, y);
+                RenderPolygonScanline(rp, y, previousWasShadowMask);
         }
     }
 }
@@ -1711,29 +1868,19 @@ void SoftRenderer3D::ClearBuffers()
 
 void SoftRenderer3D::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
 {
-    int j = 0;
-    for (int i = 0; i < npolys; i++)
+    const int polygonCount = SetupPolygonList(PolygonList, polygons, npolys, 0);
+
+    RenderScanline(PolygonList, 0, polygonCount);
+    for (s32 y = 1; y < 192; ++y)
     {
-        if (polygons[i]->Degenerate) continue;
-        SetupPolygon(&PolygonList[j++], polygons[i]);
-    }
-
-    RenderScanline(0, j);
-
-    for (s32 y = 1; y < 192; y++)
-    {
-        RenderScanline(y, j);
-        ScanlineFinalPass(y-1);
-
+        RenderScanline(PolygonList, y, polygonCount);
+        ScanlineFinalPass(y - 1);
         if (threaded)
-            // Notify the main thread that we're done with a scanline.
             Platform::Semaphore_Post(Sema_ScanlineCount);
     }
 
     ScanlineFinalPass(191);
-
     if (threaded)
-        // If this renderer is threaded, notify the main thread that we're done with the frame.
         Platform::Semaphore_Post(Sema_ScanlineCount);
 }
 
@@ -1745,13 +1892,9 @@ void SoftRenderer3D::FinishRendering()
 
 void SoftRenderer3D::RenderFrame()
 {
-    auto textureDirty = GPU.VRAMDirty_Texture.DeriveState(GPU.VRAMMap_Texture, GPU);
-    auto texPalDirty = GPU.VRAMDirty_TexPal.DeriveState(GPU.VRAMMap_TexPal, GPU);
-
-    bool textureChanged = GPU.MakeVRAMFlat_TextureCoherent(textureDirty);
-    bool texPalChanged = GPU.MakeVRAMFlat_TexPalCoherent(texPalDirty);
-
-    FrameIdentical = !(textureChanged || texPalChanged) && GPU3D.RenderFrameIdentical;
+    u8 clearBitmapDirty = 0;
+    const bool textureChanged = TextureCache.Update(clearBitmapDirty);
+    FrameIdentical = !textureChanged && GPU3D.RenderFrameIdentical;
 
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {

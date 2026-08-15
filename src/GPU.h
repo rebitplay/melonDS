@@ -843,6 +843,7 @@ public:
     virtual void PostSavestate() {}
 
     virtual void SetRenderSettings(RendererSettings& settings) = 0;
+    virtual void SetOutputEnabled(bool enabled) { (void)enabled; }
 
     virtual void DrawScanline(u32 line) = 0;
     virtual void DrawSprites(u32 line) = 0;

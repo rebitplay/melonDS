@@ -60,6 +60,8 @@ target_include_directories(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
 )
 
 target_link_libraries(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE core)
+target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE REBIT_MELONDS_DUAL_SCHEDULED=1)
+target_compile_definitions(core PUBLIC REBIT_MELONDS_NDS_ONLY=1)
 if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
     target_link_libraries(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE Threads::Threads)
 endif()
@@ -91,6 +93,9 @@ if(EMSCRIPTEN)
     target_compile_options(core PUBLIC "-msimd128")
     target_compile_options(teakra PUBLIC "-msimd128")
     target_compile_options(melonds_dual PRIVATE "-msimd128")
+    target_compile_options(core PUBLIC "-flto")
+    target_compile_options(teakra PUBLIC "-flto")
+    target_compile_options(melonds_dual PRIVATE "-flto")
 
     if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
         target_compile_options(core PUBLIC "-pthread")
@@ -100,13 +105,13 @@ if(EMSCRIPTEN)
 
     target_link_options(melonds_dual PRIVATE
         "--no-entry"
+        "-flto"
         "-msimd128"
         "-sMODULARIZE=1"
         "-sEXPORT_NAME=${REBIT_MELONDS_DUAL_EXPORT_NAME}"
         "-sENVIRONMENT=worker,node"
-        "-sALLOW_MEMORY_GROWTH=1"
-        "-sINITIAL_MEMORY=335544320"
-        "-sMAXIMUM_MEMORY=1073741824"
+        "-sALLOW_MEMORY_GROWTH=0"
+        "-sINITIAL_MEMORY=536870912"
         "-sSTACK_SIZE=2097152"
         "-sNO_EXIT_RUNTIME=1"
         "-sDISABLE_EXCEPTION_CATCHING=0"
@@ -117,7 +122,7 @@ if(EMSCRIPTEN)
     if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
         target_link_options(melonds_dual PRIVATE
             "-pthread"
-            "-sPTHREAD_POOL_SIZE=4"
+            "-sPTHREAD_POOL_SIZE=3"
         )
     endif()
 

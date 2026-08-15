@@ -14,13 +14,13 @@ struct SlotContext
 {
     int id = 0;
     std::atomic<bool> stopped {false};
-    std::atomic<std::uint64_t> packetsSent {0};
-    std::atomic<std::uint64_t> packetsReceived {0};
-    std::atomic<std::uint64_t> commands {0};
-    std::atomic<std::uint64_t> replies {0};
-    std::atomic<std::uint64_t> multiplayerCalls {0};
-    std::atomic<std::uint64_t> replyBaseline {0};
-    std::atomic<bool> awaitingReplies {false};
+    std::uint64_t packetsSent = 0;
+    std::uint64_t packetsReceived = 0;
+    std::uint64_t commands = 0;
+    std::uint64_t replies = 0;
+    std::uint64_t multiplayerCalls = 0;
+    std::uint64_t replyBaseline = 0;
+    bool awaitingReplies = false;
     std::vector<std::uint8_t> latestSave;
 };
 
@@ -47,6 +47,7 @@ void RequestMultiplayerYield(void* userdata) noexcept;
 #endif
 bool EnterMultiplayerTurn(void* userdata, MultiplayerOperation operation) noexcept;
 void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept;
+bool DeferMultiplayerReceivePoll(void* userdata, MultiplayerOperation operation) noexcept;
 void NoteMultiplayerCommand(void* userdata) noexcept;
 void NoteMultiplayerReply() noexcept;
 void SignalStopped(void* userdata) noexcept;

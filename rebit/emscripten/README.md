@@ -61,6 +61,13 @@ cmake --build build/wasm --parallel
 Artifacts are written to `build/wasm/dist/melonds_dual.{js,wasm}`. Emscripten
 embeds the pthread bootstrap in the modularized JavaScript wrapper.
 
+The WebAssembly interpreter uses a generated direct dispatcher. Regenerate it
+after changing `src/ARM_InstrTable.h`, or verify it before a release build:
+
+```bash
+python3 rebit/emscripten/generate_arm_dispatch.py --check
+```
+
 ## Historical cooperative WebAssembly build
 
 The cooperative profile is retained only for reproducibility of the rejected
