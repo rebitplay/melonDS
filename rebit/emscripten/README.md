@@ -68,6 +68,23 @@ after changing `src/ARM_InstrTable.h`, or verify it before a release build:
 python3 rebit/emscripten/generate_arm_dispatch.py --check
 ```
 
+## Experimental rollback scheduler check
+
+Rollback is opt-in (`REBIT_MELONDS_ROLLBACK=ON`), with the isolated build identity
+`melonds-dual-rollback-experimental-2`. Frame completion participates in the
+radio turn schedule so host thread timing cannot mark a console finished during
+another console's handoff. The regression uses the actual scheduler without a
+ROM and covers both seats and the host's reply-wait path:
+
+```bash
+cmake -S rebit/emscripten -B build/native-rollback -DREBIT_MELONDS_ROLLBACK=ON
+cmake --build build/native-rollback --parallel
+ctest --test-dir build/native-rollback --output-on-failure
+```
+
+This does not replace real-ROM restore/replay and public-CDN browser tests.
+The default Lockstep and Android builds do not enable this profile.
+
 ## Historical cooperative WebAssembly build
 
 The cooperative profile is retained only for reproducibility of the rejected

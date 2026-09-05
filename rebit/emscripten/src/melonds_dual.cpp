@@ -200,6 +200,14 @@ void CompleteMultiplayerFrame(int player)
         || player < 0
         || player >= static_cast<int>(State.slots.size()))
         return;
+#ifdef REBIT_MELONDS_ROLLBACK
+    // Completion is a scheduled operation too. Otherwise it can change the
+    // done mask between another console's mask read and turn handoff, leaving
+    // the turn on a finished worker. Even without a deadlock, skipping that
+    // worker according to host timing makes replay nondeterministic.
+    if (!EnterMultiplayerTurn(&State.slots[player]->context, MultiplayerOperation::CompleteFrame))
+        return;
+#endif
     const std::uint32_t doneMask = State.multiplayerDoneMask.fetch_or(1U << player, std::memory_order_acq_rel)
         | (1U << player);
     const std::uint32_t allDoneMask = (1U << State.slots.size()) - 1U;

@@ -35,6 +35,9 @@ enum class MultiplayerOperation : std::uint8_t
     SendAck,
     RecvHostPacket,
     RecvReplies,
+#ifdef REBIT_MELONDS_ROLLBACK
+    CompleteFrame,
+#endif
 };
 
 int InstanceId(void* userdata) noexcept;

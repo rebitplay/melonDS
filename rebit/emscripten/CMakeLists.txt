@@ -82,7 +82,7 @@ if(REBIT_MELONDS_DUAL_COOPERATIVE)
     )
 elseif(REBIT_MELONDS_ROLLBACK)
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-        REBIT_MELONDS_DUAL_BUILD="melonds-dual-rollback-experimental-1"
+        REBIT_MELONDS_DUAL_BUILD="melonds-dual-rollback-experimental-2"
         REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-rollback-experimental-v1"
     )
 else()
@@ -93,6 +93,19 @@ else()
 endif()
 if(REBIT_MELONDS_DUAL_NATIVE_JIT)
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE REBIT_MELONDS_DUAL_NATIVE_JIT=1)
+endif()
+
+if(REBIT_MELONDS_ROLLBACK AND NOT EMSCRIPTEN)
+    enable_testing()
+    add_executable(nds_rollback_scheduler_test src/scheduler_test.cpp)
+    target_include_directories(nds_rollback_scheduler_test PRIVATE
+        $<TARGET_PROPERTY:rebit_melonds_dual_runtime,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(nds_rollback_scheduler_test PRIVATE
+        $<TARGET_PROPERTY:rebit_melonds_dual_runtime,COMPILE_DEFINITIONS>)
+    target_link_libraries(nds_rollback_scheduler_test PRIVATE rebit_melonds_dual_runtime core)
+    set_property(TARGET nds_rollback_scheduler_test PROPERTY CXX_STANDARD 20)
+    add_test(NAME nds_rollback_scheduler COMMAND nds_rollback_scheduler_test)
+    set_tests_properties(nds_rollback_scheduler PROPERTIES TIMEOUT 10)
 endif()
 
 if(EMSCRIPTEN)
