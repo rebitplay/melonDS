@@ -149,6 +149,14 @@ GPU3D::GPU3D(melonDS::GPU& gpu) noexcept :
 
 void Vertex::DoSavestate(Savestate* file) noexcept
 {
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        static_assert(sizeof(Vertex) == 64, "Private vertex snapshot ABI changed");
+        file->VarArray(this, sizeof(*this));
+        return;
+    }
+#endif
     file->VarArray(Position, sizeof(Position));
     file->VarArray(Color, sizeof(Color));
     file->VarArray(TexCoords, sizeof(TexCoords));
@@ -404,6 +412,37 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
     file->Var32(&FlushRequest);
     file->Var32(&FlushAttributes);
 
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        // Vertex storage is pointer-free. Polygon pointer arrays are encoded
+        // separately as indices; copy their contiguous scalar payload in one
+        // operation instead of hundreds of thousands of tiny serializer calls.
+        file->VarArray(VertexRAM, sizeof(VertexRAM));
+        constexpr size_t payload = offsetof(Polygon, SortKey) + sizeof(u32) - offsetof(Polygon, NumVertices);
+        for (auto& poly : PolygonRAM)
+        {
+            u32 indices[10];
+            if (file->Saving)
+                for (int i = 0; i < 10; ++i)
+                    indices[i] = poly.Vertices[i] ? static_cast<u32>(poly.Vertices[i] - VertexRAM) : UINT32_MAX;
+            file->VarArray(indices, sizeof(indices));
+            file->VarArray(&poly.NumVertices, payload);
+            if (!file->Saving)
+            {
+                if (file->Error || poly.NumVertices > 10) { file->Error = true; return; }
+                for (int i = 0; i < 10; ++i)
+                {
+                    if (indices[i] != UINT32_MAX && indices[i] >= sizeof(VertexRAM) / sizeof(Vertex))
+                    { file->Error = true; return; }
+                    poly.Vertices[i] = indices[i] == UINT32_MAX ? nullptr : &VertexRAM[indices[i]];
+                }
+            }
+        }
+    }
+    else
+#endif
+    {
     for (Vertex& vtx : VertexRAM)
     {
         vtx.DoSavestate(file);
@@ -478,6 +517,8 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
         }
     }
 
+    }
+
     CmdStallQueue.DoSavestate(file);
 
     file->Var32((u32*)&VertexPipeline);
@@ -541,7 +582,16 @@ void GPU3D::DoSavestate(Savestate* file) noexcept
     file->Var32(&TexParam);
     file->Var32(&TexPalette);
 
-    RenderFrameIdentical = false;
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->VarBool(&RenderFrameIdentical);
+        file->VarBool(&ClipMatrixDirty);
+        file->VarArray(ClipMatrix, sizeof(ClipMatrix));
+    }
+    else
+#endif
+        RenderFrameIdentical = false;
 }
 
 
@@ -2527,6 +2577,9 @@ void GPU3D::WriteToGXFIFO(u32 val) noexcept
         if ((CurCommand & 0xFF) || (NumCommands == 4 && CurCommand == 0))
         {
             CmdFIFOEntry entry;
+#ifdef REBIT_MELONDS_ROLLBACK
+            entry._contents = 0; // Reserved command bits must not contain host stack bytes.
+#endif
             entry.Command = CurCommand & 0xFF;
             entry.Param = val;
             CmdFIFOWrite(entry);
@@ -2882,6 +2935,9 @@ void GPU3D::Write32(u32 addr, u32 val) noexcept
     if (addr >= 0x04000440 && addr < 0x040005CC)
     {
         CmdFIFOEntry entry;
+#ifdef REBIT_MELONDS_ROLLBACK
+        entry._contents = 0;
+#endif
         entry.Command = (addr & 0x1FC) >> 2;
         entry.Param = val;
         CmdFIFOWrite(entry);
@@ -2918,4 +2974,3 @@ void GPU3D::Write32(u32 addr, u32 val) noexcept
 }
 
 }
-

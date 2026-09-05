@@ -24,6 +24,7 @@
 namespace melonDS
 {
 class Wifi;
+class Savestate;
 
 class WifiAP
 {
@@ -31,6 +32,9 @@ public:
     WifiAP(Wifi* client, void* userdata);
     ~WifiAP();
     void Reset();
+#ifdef REBIT_MELONDS_ROLLBACK
+    void DoRollbackState(Savestate* file);
+#endif
 
     static const char* APName;
     static const u8 APMac[6];

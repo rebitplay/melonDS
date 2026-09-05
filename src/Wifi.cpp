@@ -313,6 +313,9 @@ void Wifi::DoSavestate(Savestate* file)
     file->Bool32(&IsMPClient);
     file->Var64(&NextSync);
     file->Var64(&RXTimestamp);
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback) WifiAP->DoRollbackState(file);
+#endif
 }
 
 

@@ -5,6 +5,10 @@ project(rebit_melonds_dual LANGUAGES C CXX)
 option(REBIT_MELONDS_DUAL_COOPERATIVE "Build the single-threaded cooperative WebAssembly runtime" OFF)
 option(REBIT_MELONDS_DUAL_BUILD_CLI "Build the native command-line benchmark" ON)
 option(REBIT_MELONDS_DUAL_NATIVE_JIT "Enable melonDS JIT execution in native builds" OFF)
+option(REBIT_MELONDS_ROLLBACK "Build the isolated experimental rollback runtime" OFF)
+if(REBIT_MELONDS_ROLLBACK AND (REBIT_MELONDS_DUAL_COOPERATIVE OR REBIT_MELONDS_DUAL_NATIVE_JIT))
+    message(FATAL_ERROR "Rollback currently requires the parallel interpreter runtime")
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -62,6 +66,9 @@ target_include_directories(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
 target_link_libraries(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE core)
 target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE REBIT_MELONDS_DUAL_SCHEDULED=1)
 target_compile_definitions(core PUBLIC REBIT_MELONDS_NDS_ONLY=1)
+if(REBIT_MELONDS_ROLLBACK)
+    target_compile_definitions(core PUBLIC REBIT_MELONDS_ROLLBACK=1)
+endif()
 if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
     target_link_libraries(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE Threads::Threads)
 endif()
@@ -72,6 +79,11 @@ if(REBIT_MELONDS_DUAL_COOPERATIVE)
         REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-1"
         REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-dual-cooperative-1"
         REBIT_MELONDS_DUAL_COOPERATIVE=1
+    )
+elseif(REBIT_MELONDS_ROLLBACK)
+    target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
+        REBIT_MELONDS_DUAL_BUILD="melonds-dual-rollback-experimental-1"
+        REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-rollback-experimental-v1"
     )
 else()
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
@@ -86,6 +98,8 @@ endif()
 if(EMSCRIPTEN)
     if(REBIT_MELONDS_DUAL_COOPERATIVE)
         set(REBIT_MELONDS_DUAL_EXPORT_NAME createMelondsDualCooperativeModule)
+    elseif(REBIT_MELONDS_ROLLBACK)
+        set(REBIT_MELONDS_DUAL_EXPORT_NAME createMelondsDualRollbackModule)
     else()
         set(REBIT_MELONDS_DUAL_EXPORT_NAME createMelondsDualModule)
     endif()
@@ -131,4 +145,7 @@ if(EMSCRIPTEN)
         OUTPUT_NAME "melonds_dual"
         SUFFIX ".js"
     )
+    if(REBIT_MELONDS_ROLLBACK)
+        set_target_properties(melonds_dual PROPERTIES OUTPUT_NAME "melonds_dual_rollback")
+    endif()
 endif()

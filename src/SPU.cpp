@@ -291,6 +291,28 @@ void SPU::DoSavestate(Savestate* file)
 
     for (SPUCaptureUnit& capture : Capture)
         capture.DoSavestate(file);
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->Section("SPUO");
+        file->Var32(reinterpret_cast<u32*>(&BlipTimer));
+        for (auto* blip : {BlipLeft, BlipRight})
+        {
+            u8 bytes[4096];
+            const int length = blip_state_size(blip);
+            if (length <= 0 || length > sizeof(bytes)) { file->Error = true; return; }
+            if (file->Saving && !blip_state_export(blip, bytes, length)) { file->Error = true; return; }
+            file->VarArray(bytes, length);
+            if (!file->Saving && !file->Error && !blip_state_import(blip, bytes, length))
+            { file->Error = true; return; }
+        }
+        file->Var32(&OutputBufferReadPos);
+        file->Var32(&OutputBufferWritePos);
+        file->VarArray(OutputBuffer, 2 * OutputBufferSize * sizeof(s16));
+        if (OutputBufferReadPos >= 2 * OutputBufferSize || OutputBufferWritePos >= 2 * OutputBufferSize)
+            file->Error = true;
+    }
+#endif
 }
 
 

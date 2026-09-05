@@ -59,6 +59,11 @@ public:
     void EnableRenderThread();
     void StopRenderThread();
     void InvalidateTextureCache();
+#ifdef REBIT_MELONDS_ROLLBACK
+    bool RollbackHealthy() const { return !RollbackRenderFaulted; }
+    bool WaitForRollbackRender();
+    void DoRollbackState(Savestate* file);
+#endif
 
 private:
     SoftRenderer& Parent;
@@ -529,6 +534,16 @@ private:
     // Used to allow the main thread to read some scanlines
     // before (the 3D portion of) the entire frame is rasterized.
     Platform::Semaphore* Sema_ScanlineCount;
+
+#ifdef REBIT_MELONDS_ROLLBACK
+    void SubmitRollbackRender();
+    Platform::Semaphore* Sema_RollbackDone;
+    std::atomic<u32> RollbackSubmitted {0};
+    std::atomic<u32> RollbackCompleted {0};
+    u32 RollbackScanlinesRead = 0;
+    bool RollbackFinishConsumed = false;
+    bool RollbackRenderFaulted = false;
+#endif
 
 };
 }

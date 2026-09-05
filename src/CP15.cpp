@@ -75,6 +75,12 @@ void ARMv5::CP15Reset()
 
 void ARMv5::CP15DoSavestate(Savestate* file)
 {
+#ifdef REBIT_MELONDS_ROLLBACK
+    const u32 previousControl = CP15Control;
+    const u32 previousPU[] = {PU_CodeCacheable, PU_DataCacheable, PU_DataCacheWrite, PU_CodeRW, PU_DataRW};
+    u32 previousRegions[8];
+    memcpy(previousRegions, PU_Region, sizeof(previousRegions));
+#endif
     file->Section("CP15");
 
     file->Var32(&CP15Control);
@@ -98,8 +104,31 @@ void ARMv5::CP15DoSavestate(Savestate* file)
     {
         UpdateDTCMSetting();
         UpdateITCMSetting();
-        UpdatePURegions(true);
+#ifdef REBIT_MELONDS_ROLLBACK
+        const u32 restoredPU[] = {PU_CodeCacheable, PU_DataCacheable, PU_DataCacheWrite, PU_CodeRW, PU_DataRW};
+        // The derived 1M-entry timing/protection tables are still valid when
+        // their source registers have not changed. A changed MPU always takes
+        // the complete rebuild path; never guess from the current PC alone.
+        if (!file->Rollback || previousControl != CP15Control
+            || memcmp(previousPU, restoredPU, sizeof(previousPU)) != 0
+            || memcmp(previousRegions, PU_Region, sizeof(previousRegions)) != 0)
+#endif
+            UpdatePURegions(true);
     }
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->Var32(&RNGSeed);
+        file->VarArray(ICache, sizeof(ICache));
+        file->VarArray(ICacheTags, sizeof(ICacheTags));
+        file->VarArray(ICacheCount, sizeof(ICacheCount));
+        u32 line = CurICacheLine ? static_cast<u32>(CurICacheLine - ICache) : UINT32_MAX;
+        file->Var32(&line);
+        if (line != UINT32_MAX && (line >= sizeof(ICache) || (line & 31)))
+        { file->Error = true; return; }
+        if (!file->Saving) CurICacheLine = line == UINT32_MAX ? nullptr : ICache + line;
+    }
+#endif
 }
 
 

@@ -67,6 +67,11 @@ void SoftRenderer3D::StopRenderThread()
 
 void SoftRenderer3D::SetupRenderThread()
 {
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (!WaitForRollbackRender()) return;
+    RollbackScanlinesRead = 0;
+    RollbackFinishConsumed = false;
+#endif
     if (Threaded)
     {
         if (!RenderThreadRunning.load(std::memory_order_relaxed))
@@ -111,7 +116,11 @@ void SoftRenderer3D::EnableRenderThread()
 {
     if (Threaded && Sema_RenderStart)
     {
+#ifdef REBIT_MELONDS_ROLLBACK
+        SubmitRollbackRender();
+#else
         Platform::Semaphore_Post(Sema_RenderStart);
+#endif
     }
 }
 
@@ -121,6 +130,9 @@ SoftRenderer3D::SoftRenderer3D(melonDS::GPU3D& gpu3D, SoftRenderer& parent) noex
     Sema_RenderStart = Platform::Semaphore_Create();
     Sema_RenderDone = Platform::Semaphore_Create();
     Sema_ScanlineCount = Platform::Semaphore_Create();
+#ifdef REBIT_MELONDS_ROLLBACK
+    Sema_RollbackDone = Platform::Semaphore_Create();
+#endif
 
     RenderThreadRunning = false;
     RenderThreadRendering = false;
@@ -135,14 +147,24 @@ SoftRenderer3D::~SoftRenderer3D()
     Platform::Semaphore_Free(Sema_RenderStart);
     Platform::Semaphore_Free(Sema_RenderDone);
     Platform::Semaphore_Free(Sema_ScanlineCount);
+#ifdef REBIT_MELONDS_ROLLBACK
+    Platform::Semaphore_Free(Sema_RollbackDone);
+#endif
 }
 
 void SoftRenderer3D::Reset()
 {
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (!WaitForRollbackRender()) return;
+#endif
     TextureCache.Reset();
     memset(ColorBuffer, 0, BufferSize * 2 * 4);
     memset(DepthBuffer, 0, BufferSize * 2 * 4);
     memset(AttrBuffer, 0, BufferSize * 2 * 4);
+#ifdef REBIT_MELONDS_ROLLBACK
+    memset(StencilBuffer, 0, sizeof(StencilBuffer));
+    FrameIdentical = false;
+#endif
 
     SetupRenderThread();
     EnableRenderThread();
@@ -153,10 +175,67 @@ void SoftRenderer3D::InvalidateTextureCache()
     TextureCache.Reset();
 }
 
+#ifdef REBIT_MELONDS_ROLLBACK
+bool SoftRenderer3D::WaitForRollbackRender()
+{
+    if (RollbackRenderFaulted) return false;
+    const auto expected = RollbackSubmitted.load(std::memory_order_acquire);
+    const auto deadline = Platform::GetMSCount() + 2000;
+    while (RollbackCompleted.load(std::memory_order_acquire) != expected)
+    {
+        if (Platform::GetMSCount() >= deadline)
+        {
+            RollbackRenderFaulted = true;
+            return false;
+        }
+        Platform::Semaphore_TryWait(Sema_RollbackDone, 10);
+    }
+    Platform::Semaphore_Reset(Sema_RollbackDone);
+    return true;
+}
+
+void SoftRenderer3D::SubmitRollbackRender()
+{
+    if (RollbackRenderFaulted) return;
+    RollbackScanlinesRead = 0;
+    RollbackFinishConsumed = false;
+    RollbackSubmitted.fetch_add(1, std::memory_order_release);
+    Platform::Semaphore_Post(Sema_RenderStart);
+}
+
+void SoftRenderer3D::DoRollbackState(Savestate* file)
+{
+    file->VarArray(ColorBuffer, sizeof(ColorBuffer));
+    file->VarArray(DepthBuffer, sizeof(DepthBuffer));
+    file->VarArray(AttrBuffer, sizeof(AttrBuffer));
+    file->VarArray(StencilBuffer, sizeof(StencilBuffer));
+    file->VarBool(&FrameIdentical);
+    file->Var32(&RollbackScanlinesRead);
+    file->VarBool(&RollbackFinishConsumed);
+    if (RollbackScanlinesRead > 192) { file->Error = true; return; }
+    // PolygonList is rebuilt at the next RenderFrame. Cached texture contents
+    // must not survive restoration of the VRAM from which they were decoded.
+    if (!file->Saving)
+    {
+        TextureCache.Reset();
+        if (Threaded)
+        {
+            Platform::Semaphore_Reset(Sema_ScanlineCount);
+            Platform::Semaphore_Post(Sema_ScanlineCount, 192 - RollbackScanlinesRead);
+            Platform::Semaphore_Reset(Sema_RenderDone);
+            if (!RollbackFinishConsumed) Platform::Semaphore_Post(Sema_RenderDone);
+        }
+    }
+}
+#endif
+
 void SoftRenderer3D::SetThreaded(bool threaded) noexcept
 {
     if (Threaded != threaded)
     {
+#ifdef REBIT_MELONDS_ROLLBACK
+        if (!WaitForRollbackRender()) return;
+#endif
         Threaded = threaded;
         SetupRenderThread();
         EnableRenderThread();
@@ -1887,7 +1966,12 @@ void SoftRenderer3D::RenderPolygons(bool threaded, Polygon** polygons, int npoly
 void SoftRenderer3D::FinishRendering()
 {
     if (RenderThreadRunning.load(std::memory_order_relaxed) && !GPU3D.AbortFrame)
+    {
         Platform::Semaphore_Wait(Sema_RenderDone);
+#ifdef REBIT_MELONDS_ROLLBACK
+        RollbackFinishConsumed = true;
+#endif
+    }
 }
 
 void SoftRenderer3D::RenderFrame()
@@ -1899,7 +1983,11 @@ void SoftRenderer3D::RenderFrame()
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {
         // "Render thread, you're up! Get moving."
+#ifdef REBIT_MELONDS_ROLLBACK
+        SubmitRollbackRender();
+#else
         Platform::Semaphore_Post(Sema_RenderStart);
+#endif
     }
     else if (!FrameIdentical)
     {
@@ -1944,6 +2032,10 @@ void SoftRenderer3D::RenderThreadFunc()
         Platform::Semaphore_Post(Sema_RenderDone);
 
         RenderThreadRendering = false;
+#ifdef REBIT_MELONDS_ROLLBACK
+        RollbackCompleted.fetch_add(1, std::memory_order_release);
+        Platform::Semaphore_Post(Sema_RollbackDone);
+#endif
     }
 }
 
@@ -1959,10 +2051,15 @@ u32* SoftRenderer3D::GetLine(int line)
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {
         if (line < 192)
+        {
             // We need a scanline, so let's wait for the render thread to finish it.
             // (both threads process scanlines from top-to-bottom,
             // so we don't need to wait for a specific row)
             Platform::Semaphore_Wait(Sema_ScanlineCount);
+#ifdef REBIT_MELONDS_ROLLBACK
+            ++RollbackScanlinesRead;
+#endif
+        }
     }
 
     u32* rawline = &ColorBuffer[(line * ScanlineWidth) + FirstPixelOffset];

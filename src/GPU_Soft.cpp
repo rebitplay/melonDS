@@ -85,6 +85,35 @@ void SoftRenderer::PostSavestate()
         rend3d->EnableRenderThread();
 }
 
+#ifdef REBIT_MELONDS_ROLLBACK
+bool SoftRenderer::RollbackHealthy() const
+{
+    return static_cast<SoftRenderer3D*>(Rend3D.get())->RollbackHealthy();
+}
+
+void SoftRenderer::PrepareRollbackState(Savestate* file)
+{
+    if (!static_cast<SoftRenderer3D*>(Rend3D.get())->WaitForRollbackRender()) file->Error = true;
+}
+
+void SoftRenderer::DoRollbackState(Savestate* file)
+{
+    // Rendering is quiescent. Host threads/locks stay alive; their outstanding
+    // scanline/completion notifications are reconstructed from logical state.
+    file->Section("RSFT");
+    file->Var32(reinterpret_cast<u32*>(&BackBuffer));
+    file->VarBool(&RenderingCurrentFrame);
+    for (auto& pair : Framebuffer)
+        for (auto* screen : pair)
+            file->VarArray(screen, 256 * 192 * sizeof(u32));
+    file->VarArray(Output2D, sizeof(Output2D));
+    static_cast<SoftRenderer2D*>(Rend2D_A.get())->DoRollbackState(file);
+    static_cast<SoftRenderer2D*>(Rend2D_B.get())->DoRollbackState(file);
+    static_cast<SoftRenderer3D*>(Rend3D.get())->DoRollbackState(file);
+    if (!file->Saving) Output3D = nullptr; // Rebound by DrawScanline before use.
+}
+#endif
+
 
 void SoftRenderer::SetRenderSettings(RendererSettings& settings)
 {

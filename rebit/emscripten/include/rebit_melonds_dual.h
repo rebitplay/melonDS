@@ -60,6 +60,17 @@ uint32_t md_mp_commands(int player);
 uint32_t md_mp_replies(int player);
 double md_last_frame_ms(void);
 
+#ifdef REBIT_MELONDS_ROLLBACK
+/* Experimental, process-local state ring. These are not network import APIs.
+ * Returns total serialized bytes per slot, or zero on failure.
+ * A slot must be loaded with the exact frame tag returned by md_frame(). */
+uint32_t md_rollback_configure(uint32_t capacity);
+int md_rollback_save_slot(uint32_t slot, uint32_t frame);
+int md_rollback_load_slot(uint32_t slot, uint32_t frame);
+uint32_t md_rollback_part_size(uint32_t slot, uint32_t part);
+const uint8_t* md_rollback_part_data(uint32_t slot, uint32_t part);
+#endif
+
 #if defined(__cplusplus)
 }
 #endif

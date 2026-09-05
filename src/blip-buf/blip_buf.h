@@ -61,6 +61,13 @@ int blip_read_samples( blip_t*, short out [], int count, int stereo );
 /** Frees buffer. No effect if NULL is passed. */
 void blip_delete( blip_t* );
 
+#ifdef REBIT_MELONDS_ROLLBACK
+/* Pointer-free private rollback state. Export/import never allocate. */
+int blip_state_size( const blip_t* );
+int blip_state_export( const blip_t*, unsigned char* data, int length );
+int blip_state_import( blip_t*, const unsigned char* data, int length );
+#endif
+
 
 /* Deprecated */
 typedef blip_t blip_buffer_t;

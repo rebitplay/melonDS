@@ -119,6 +119,20 @@ struct Runtime
 
 Runtime State;
 
+#ifdef REBIT_MELONDS_ROLLBACK
+struct RollbackRecord
+{
+    std::array<std::vector<std::uint8_t>, MaximumPlayers + 1> parts;
+    std::array<InputState, MaximumPlayers> inputs {};
+    std::array<std::array<std::uint64_t, 7>, MaximumPlayers> context {};
+    std::uint64_t replySequence = 0;
+    std::uint32_t frame = UINT32_MAX;
+};
+std::vector<RollbackRecord> RollbackRing;
+std::uint32_t RollbackBytes = 0;
+bool RollbackFaulted = false;
+#endif
+
 int NextMultiplayerTurn(int current, std::uint32_t doneMask)
 {
     const int players = static_cast<int>(State.slots.size());
@@ -314,7 +328,11 @@ bool RuntimeAtCheckpointBoundary()
 bool ExportCheckpoint()
 {
     State.error.clear();
-    if (!State.loaded || State.slots.empty() || !State.multiplayer || !RuntimeAtCheckpointBoundary())
+    if (!State.loaded || State.slots.empty() || !State.multiplayer || !RuntimeAtCheckpointBoundary()
+#ifdef REBIT_MELONDS_ROLLBACK
+        || RollbackFaulted
+#endif
+    )
     {
         State.error = "NDS Local Wireless checkpoint requested outside a completed frame.";
         return false;
@@ -385,6 +403,9 @@ bool ImportCheckpoint(std::uint8_t* data, std::uint32_t length)
 {
     State.error.clear();
     if (!State.loaded
+#ifdef REBIT_MELONDS_ROLLBACK
+        || RollbackFaulted
+#endif
         || !data
         || length < 20
         || length > MaximumCheckpointBytes
@@ -468,6 +489,12 @@ bool ImportCheckpoint(std::uint8_t* data, std::uint32_t length)
     }
 
     std::lock_guard<std::mutex> guard(State.frameMutex);
+#ifdef REBIT_MELONDS_ROLLBACK
+    for (auto& record : RollbackRing) record.frame = UINT32_MAX;
+    // Deserialization can fail after changing one console. Never execute or
+    // export that half-restored timeline; only a fully restored pair is usable.
+    RollbackFaulted = true;
+#endif
     for (std::uint32_t player = 0; player < players; ++player)
     {
         melonDS::Savestate state(const_cast<std::uint8_t*>(slots[player].state), slots[player].stateLength, false);
@@ -497,6 +524,9 @@ bool ImportCheckpoint(std::uint8_t* data, std::uint32_t length)
         CopyFramebuffer(slot);
     }
     State.multiplayerReplySequence.store(replySequence, std::memory_order_release);
+#ifdef REBIT_MELONDS_ROLLBACK
+    RollbackFaulted = false;
+#endif
     return true;
 }
 
@@ -605,6 +635,11 @@ void WorkerLoop(Slot* slot)
 
 void StopRuntime()
 {
+#ifdef REBIT_MELONDS_ROLLBACK
+    RollbackRing.clear();
+    RollbackBytes = 0;
+    RollbackFaulted = false;
+#endif
     CancelMultiplayerFrame();
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     State.shuttingDown = true;
@@ -981,6 +1016,13 @@ REBIT_EXPORT void md_set_visible_player(int player)
 {
     if (rebit::GetSlot(player))
     {
+#ifdef REBIT_MELONDS_ROLLBACK
+        if (rebit::RollbackFaulted || !rebit::RuntimeAtCheckpointBoundary())
+        { rebit::State.error = "NDS rollback view change requires a healthy frame boundary."; return; }
+        std::lock_guard<std::mutex> guard(rebit::State.frameMutex);
+        if (rebit::State.visiblePlayer != player)
+            for (auto& record : rebit::RollbackRing) record.frame = UINT32_MAX;
+#endif
         rebit::State.visiblePlayer = player;
         for (const auto& slot : rebit::State.slots)
         {
@@ -1013,6 +1055,15 @@ REBIT_EXPORT int md_run_frame()
     using namespace rebit;
     if (!State.loaded || State.slots.empty())
         return 0;
+#ifdef REBIT_MELONDS_ROLLBACK
+    for (const auto& slot : State.slots)
+        if (!slot->console->GetRenderer().RollbackHealthy())
+        {
+            RollbackFaulted = true;
+            State.error = "NDS rollback renderer watchdog fired; rebuild the runtime for recovery.";
+        }
+    if (RollbackFaulted) return 0;
+#endif
 
     const auto started = std::chrono::steady_clock::now();
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
@@ -1030,6 +1081,11 @@ REBIT_EXPORT int md_run_frame()
         };
         if (!State.frameComplete.wait_for(lock, MultiplayerFrameWatchdog, completed))
         {
+#ifdef REBIT_MELONDS_ROLLBACK
+            // Finish joining the workers below, but never accept a speculative
+            // frame produced through a wall-clock-dependent emergency schedule.
+            RollbackFaulted = true;
+#endif
             // Never strand the browser on a starved LocalMP turn. Cancelling
             // only the per-frame turn barrier lets both consoles finish; the
             // periodic cross-peer hash and checkpoint protocol repair any
@@ -1045,8 +1101,140 @@ REBIT_EXPORT int md_run_frame()
 #endif
 
     State.lastFrameMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (RollbackFaulted)
+    {
+        State.error = "NDS rollback worker watchdog fired; coordinated recovery is required.";
+        return 0;
+    }
+#endif
     return 1;
 }
+
+#ifdef REBIT_MELONDS_ROLLBACK
+// These APIs intentionally accept no remote state bytes. Ring slots are
+// private, frame-tagged, and invalidated at every lifecycle/recovery boundary.
+REBIT_EXPORT std::uint32_t md_rollback_configure(std::uint32_t capacity)
+{
+    using namespace rebit;
+    State.error.clear();
+    if (!State.loaded || RollbackFaulted || !RuntimeAtCheckpointBoundary() || capacity < 2 || capacity > 9)
+    { State.error = "NDS rollback ring configuration is invalid."; return 0; }
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    try
+    {
+        RollbackRing.clear();
+        RollbackBytes = 0;
+        std::array<std::uint32_t, MaximumPlayers + 1> lengths {};
+        for (std::size_t index = 0; index <= State.slots.size(); ++index)
+        {
+            melonDS::Savestate state(12 * 1024 * 1024);
+            state.Rollback = true;
+            if (index == State.slots.size()) State.multiplayer->DoRollbackState(&state);
+            else if (!State.slots[index]->console->DoSavestate(&state)) state.Error = true;
+            if (state.Error) { State.error = "Could not measure NDS rollback state."; return 0; }
+            lengths[index] = state.Length();
+            RollbackBytes += state.Length();
+        }
+        if (static_cast<std::uint64_t>(RollbackBytes) * capacity > 192 * 1024 * 1024)
+        { RollbackBytes = 0; State.error = "NDS rollback ring exceeds its memory budget."; return 0; }
+        RollbackRing.resize(capacity);
+        for (auto& record : RollbackRing)
+            for (std::size_t index = 0; index <= State.slots.size(); ++index)
+                record.parts[index].resize(lengths[index]);
+    }
+    catch (const std::bad_alloc&)
+    {
+        RollbackRing.clear();
+        RollbackBytes = 0;
+        State.error = "Not enough memory for the NDS rollback ring.";
+    }
+    return RollbackBytes;
+}
+
+REBIT_EXPORT int md_rollback_save_slot(std::uint32_t index, std::uint32_t frame)
+{
+    using namespace rebit;
+    if (!State.loaded || RollbackFaulted || !RuntimeAtCheckpointBoundary()
+        || index >= RollbackRing.size() || frame == UINT32_MAX)
+    { State.error = "NDS rollback save requested outside a valid frame boundary."; return 0; }
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    auto& record = RollbackRing[index];
+    record.frame = UINT32_MAX;
+    for (const auto& slot : State.slots)
+        if (slot->console->NumFrames != frame)
+        { State.error = "NDS rollback save frame does not match the consoles."; return 0; }
+    for (std::size_t player = 0; player <= State.slots.size(); ++player)
+    {
+        auto& bytes = record.parts[player];
+        melonDS::Savestate state(bytes.data(), bytes.size(), true);
+        state.Rollback = true;
+        if (player == State.slots.size()) State.multiplayer->DoRollbackState(&state);
+        else
+        {
+            auto& slot = *State.slots[player];
+            if (!slot.console->DoSavestate(&state)) state.Error = true;
+            record.inputs[player] = slot.input;
+            const auto& context = slot.context;
+            record.context[player] = { context.packetsSent, context.packetsReceived, context.commands,
+                context.replies, context.multiplayerCalls, context.replyBaseline, context.awaitingReplies ? 1U : 0U };
+        }
+        if (state.Error || state.Length() != bytes.size())
+        { State.error = "NDS rollback state geometry changed or serialization failed."; return 0; }
+    }
+    record.replySequence = State.multiplayerReplySequence.load(std::memory_order_acquire);
+    record.frame = frame;
+    return 1;
+}
+
+REBIT_EXPORT int md_rollback_load_slot(std::uint32_t index, std::uint32_t frame)
+{
+    using namespace rebit;
+    if (!State.loaded || RollbackFaulted || !RuntimeAtCheckpointBoundary()
+        || index >= RollbackRing.size() || frame == UINT32_MAX || RollbackRing[index].frame != frame)
+    { State.error = "NDS rollback slot is unavailable or has been overwritten."; return 0; }
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    const auto& record = RollbackRing[index];
+    for (std::size_t player = 0; player <= State.slots.size(); ++player)
+    {
+        const auto& bytes = record.parts[player];
+        melonDS::Savestate state(const_cast<std::uint8_t*>(bytes.data()), bytes.size(), false);
+        state.Rollback = true;
+        if (player == State.slots.size()) State.multiplayer->DoRollbackState(&state);
+        else
+        {
+            auto& slot = *State.slots[player];
+            if (!slot.console->DoSavestate(&state) || slot.console->NumFrames != frame) state.Error = true;
+            slot.input = record.inputs[player];
+            auto& context = slot.context;
+            const auto& values = record.context[player];
+            context.packetsSent = values[0]; context.packetsReceived = values[1];
+            context.commands = values[2]; context.replies = values[3]; context.multiplayerCalls = values[4];
+            context.replyBaseline = values[5]; context.awaitingReplies = values[6] != 0;
+        }
+        if (state.Error)
+        {
+            RollbackFaulted = true;
+            State.error = "NDS rollback restoration failed; coordinated recovery is required.";
+            return 0;
+        }
+    }
+    State.multiplayerReplySequence.store(record.replySequence, std::memory_order_release);
+    return 1;
+}
+
+REBIT_EXPORT std::uint32_t md_rollback_part_size(std::uint32_t index, std::uint32_t part)
+{
+    using namespace rebit;
+    return index < RollbackRing.size() && part <= State.slots.size() && RollbackRing[index].frame != UINT32_MAX
+        ? RollbackRing[index].parts[part].size() : 0;
+}
+
+REBIT_EXPORT const std::uint8_t* md_rollback_part_data(std::uint32_t index, std::uint32_t part)
+{
+    return md_rollback_part_size(index, part) ? rebit::RollbackRing[index].parts[part].data() : nullptr;
+}
+#endif
 
 REBIT_EXPORT std::uint32_t md_frame(int player)
 {
@@ -1109,6 +1297,12 @@ REBIT_EXPORT int md_import_save(int player, const std::uint8_t* data, std::uint3
     if (!data || length == 0 || expected == 0 || length != expected)
         return 0;
 
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (rebit::RollbackFaulted || !rebit::RuntimeAtCheckpointBoundary())
+    { rebit::State.error = "NDS rollback save import requires a healthy frame boundary."; return 0; }
+    std::lock_guard<std::mutex> guard(rebit::State.frameMutex);
+    for (auto& record : rebit::RollbackRing) record.frame = UINT32_MAX;
+#endif
     slot->console->SetNDSSave(data, length);
     slot->context.latestSave.assign(data, data + length);
     return 1;

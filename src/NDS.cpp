@@ -633,6 +633,9 @@ bool NDS::DoSavestate(Savestate* file)
     file->Section("NDSG");
 
     u32 config = GetSavestateConfig();
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback) config |= 0x80000000U;
+#endif
     if (file->Saving)
     {
         file->Var32(&config);
@@ -648,7 +651,11 @@ bool NDS::DoSavestate(Savestate* file)
         }
     }
 
+#ifdef REBIT_MELONDS_ROLLBACK
+    file->VarArray(MainRAM, file->Rollback ? MainRAMMask + 1 : MainRAMMaxSize);
+#else
     file->VarArray(MainRAM, MainRAMMaxSize);
+#endif
     file->VarArray(SharedWRAM, SharedWRAMSize);
     file->VarArray(ARM7WRAM, ARM7WRAMSize);
 
@@ -681,6 +688,19 @@ bool NDS::DoSavestate(Savestate* file)
 
     file->Var16(&DivCnt);
     file->Var16(&SqrtCnt);
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->VarArray(DivNumerator, sizeof(DivNumerator));
+        file->VarArray(DivDenominator, sizeof(DivDenominator));
+        file->VarArray(DivQuotient, sizeof(DivQuotient));
+        file->VarArray(DivRemainder, sizeof(DivRemainder));
+        file->VarArray(SqrtVal, sizeof(SqrtVal));
+        file->Var32(&SqrtRes);
+        file->VarBool(&Running);
+        file->Var32(reinterpret_cast<u32*>(&CurCPU));
+    }
+#endif
 
     file->Var32(&CPUStop);
 
@@ -719,6 +739,9 @@ bool NDS::DoSavestate(Savestate* file)
     file->Bool32(&LagFrameFlag);
 
     // TODO: save KeyInput????
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback) file->Var32(&KeyInput);
+#endif
     file->VarArray(KeyCnt, 2*sizeof(u16));
     file->Var16(&RCnt);
 
@@ -732,7 +755,12 @@ bool NDS::DoSavestate(Savestate* file)
         // but we do need to update the mappings
         MapSharedWRAM(WRAMCnt);
 
-        InitTimings();
+#ifdef REBIT_MELONDS_ROLLBACK
+        // Same DS instance and clock configuration: the fixed bus map does
+        // not change during a rollback. Rebuild only register-controlled maps.
+        if (!file->Rollback || ConsoleType != 0)
+#endif
+            InitTimings();
         SetGBASlotTimings();
 
         UpdateWifiTimings();

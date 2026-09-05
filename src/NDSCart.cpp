@@ -259,7 +259,13 @@ void NDSCartSlot::DoSavestate(Savestate* file) noexcept
     if (Cart)
     {
         carttype = Cart->Type();
-        cartchk = Cart->Checksum();
+#ifdef REBIT_MELONDS_ROLLBACK
+        // The private ring never crosses a ROM load/lifecycle boundary and
+        // cannot import remote slots. Avoid hashing both immutable executables
+        // at every frame; public recovery states retain the full ROM check.
+        if (!file->Rollback)
+#endif
+            cartchk = Cart->Checksum();
     }
 
     if (file->Saving)

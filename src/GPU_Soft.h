@@ -37,6 +37,11 @@ public:
 
     void PreSavestate() override;
     void PostSavestate() override;
+#ifdef REBIT_MELONDS_ROLLBACK
+    bool RollbackHealthy() const override;
+    void PrepareRollbackState(Savestate* file) override;
+    void DoRollbackState(Savestate* file) override;
+#endif
 
     void SetRenderSettings(RendererSettings& settings) override;
     void SetOutputEnabled(bool enabled) override;

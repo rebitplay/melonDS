@@ -23,6 +23,9 @@
 #include <vector>
 
 #include "LocalMP.h"
+#ifdef REBIT_MELONDS_ROLLBACK
+#include "Savestate.h"
+#endif
 
 using namespace melonDS;
 using namespace melonDS::Platform;
@@ -541,6 +544,28 @@ std::vector<u8> LocalMP::SerializeState()
 
     return output;
 }
+
+#ifdef REBIT_MELONDS_ROLLBACK
+void LocalMP::DoRollbackState(Savestate* file)
+{
+    // Private ring only, at the completed dual-frame barrier. The scheduled
+    // LocalMP implementation uses signal counters, not host semaphore state.
+    file->Section("LMP.");
+    file->Var16(&MPStatus.ConnectedBitmask);
+    file->Var32(&MPStatus.PacketWriteOffset);
+    file->Var32(&MPStatus.ReplyWriteOffset);
+    file->Var16(&MPStatus.MPHostinst);
+    file->Var16(&MPStatus.MPReplyBitmask);
+    file->Var32(reinterpret_cast<u32*>(&LastHostID));
+    file->VarArray(PacketReadOffset, sizeof(PacketReadOffset));
+    file->VarArray(ReplyReadOffset, sizeof(ReplyReadOffset));
+    file->VarArray(PacketSignalCount, sizeof(PacketSignalCount));
+    file->VarArray(ReplySignalCount, sizeof(ReplySignalCount));
+    file->VarArray(MPPacketQueue, sizeof(MPPacketQueue));
+    file->VarArray(MPReplyQueue, sizeof(MPReplyQueue));
+    file->Finish();
+}
+#endif
 
 bool LocalMP::DeserializeState(const u8* data, std::size_t length)
 {

@@ -206,7 +206,15 @@ void GPU::DoSavestate(Savestate* file) noexcept
 {
     file->Section("GPUG");
 
-    Rend->PreSavestate();
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        Rend->PrepareRollbackState(file);
+        if (file->Error) return;
+    }
+    if (!file->Rollback)
+#endif
+        Rend->PreSavestate();
 
     if (file->Saving)
     {
@@ -308,7 +316,12 @@ void GPU::DoSavestate(Savestate* file) noexcept
         PaletteDirty = 0x5F;
     }
 
-    Rend->PostSavestate();
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+        Rend->DoRollbackState(file);
+    else
+#endif
+        Rend->PostSavestate();
 }
 
 

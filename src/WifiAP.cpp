@@ -94,6 +94,23 @@ void WifiAP::Reset()
     ClientStatus = 0;
 }
 
+#ifdef REBIT_MELONDS_ROLLBACK
+void WifiAP::DoRollbackState(Savestate* file)
+{
+    // The AP also emits beacons while Local Wireless is starting up. Its
+    // clock and pending packets must rewind with the two emulated radios.
+    file->Section("WAP.");
+    file->Var64(&USCounter);
+    file->Var16(&SeqNo);
+    file->VarBool(&BeaconDue);
+    file->VarArray(PacketBuffer, sizeof(PacketBuffer));
+    file->Var32(reinterpret_cast<u32*>(&PacketLen));
+    file->Var32(reinterpret_cast<u32*>(&RXNum));
+    file->Var32(reinterpret_cast<u32*>(&ClientStatus));
+    // LANBuffer is per-call scratch, not a pending packet queue.
+}
+#endif
+
 
 void WifiAP::MSTimer()
 {

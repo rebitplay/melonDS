@@ -69,6 +69,18 @@ void Mic::DoSavestate(melonDS::Savestate *file)
     file->Var8(&StopMask);
     file->VarArray(StopCount, sizeof(StopCount));
 
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->VarArray(InputBuffer, sizeof(InputBuffer));
+        file->Var32(&InputBufferWritePos);
+        file->Var32(&InputBufferReadPos);
+        file->Var32(&InputBufferLevel);
+        if (InputBufferWritePos >= InputBufferSize || InputBufferReadPos >= InputBufferSize
+            || InputBufferLevel > InputBufferSize) file->Error = true;
+        return;
+    }
+#endif
     if (!file->Saving)
     {
         if (OpenMask)

@@ -267,12 +267,30 @@ void ARM::DoSavestate(Savestate* file)
             CodeCycles = R[15] >> 15; // cheato
         }
     }
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->Var8(&IRQ);
+        file->Var8(&IdleLoop);
+        file->Var32(&CodeRegion);
+        file->Var32(reinterpret_cast<u32*>(&CodeCycles));
+        file->Var32(&DataRegion);
+        file->Var32(reinterpret_cast<u32*>(&DataCycles));
+    }
+#endif
 }
 
 void ARMv5::DoSavestate(Savestate* file)
 {
     ARM::DoSavestate(file);
     CP15DoSavestate(file);
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->Var32(reinterpret_cast<u32*>(&RegionCodeCycles));
+        if (!file->Saving) SetupCodeMem(R[15]);
+    }
+#endif
 }
 
 

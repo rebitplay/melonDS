@@ -124,6 +124,10 @@ void FirmwareMem::DoSavestate(Savestate* file)
 
     file->Var8(&StatusReg);
     file->Var32(&Addr);
+#ifdef REBIT_MELONDS_ROLLBACK
+    // Games can write Wi-Fi/user settings on a speculative branch too.
+    if (file->Rollback) file->VarArray(FirmwareData.Buffer(), FirmwareData.Length());
+#endif
 }
 
 void FirmwareMem::SetupDirectBoot()
@@ -381,6 +385,14 @@ void TSC::DoSavestate(Savestate* file)
     file->Var8(&Data);
 
     file->Var16(&ConvResult);
+#ifdef REBIT_MELONDS_ROLLBACK
+    if (file->Rollback)
+    {
+        file->VarBool(&Hold);
+        file->Var16(&TouchX);
+        file->Var16(&TouchY);
+    }
+#endif
 }
 
 void TSC::SetTouchCoords(u16 x, u16 y)

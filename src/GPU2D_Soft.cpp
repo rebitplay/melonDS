@@ -114,6 +114,18 @@ u32 SoftRenderer2D::ColorComposite(int i, u32 val1, u32 val2) const
     return val1;
 }
 
+#ifdef REBIT_MELONDS_ROLLBACK
+void SoftRenderer2D::DoRollbackState(Savestate* file)
+{
+    file->VarArray(BGOBJLine, sizeof(BGOBJLine));
+    file->VarArray(WindowMask, sizeof(WindowMask));
+    file->VarArray(OBJLine, sizeof(OBJLine));
+    file->VarArray(OBJWindow, sizeof(OBJWindow));
+    file->Var32(&NumSprites);
+    // CurBGXMosaicTable is selected from the current BGMosaicSize before use.
+}
+#endif
+
 void SoftRenderer2D::DrawScanline(u32 line)
 {
     u32* dst = Parent.Output2D[GPU2D.Num];

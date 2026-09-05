@@ -36,6 +36,9 @@ public:
     void DrawSprites(u32 line) override;
     void VBlank() override {}
     void VBlankEnd() override {};
+#ifdef REBIT_MELONDS_ROLLBACK
+    void DoRollbackState(Savestate* file);
+#endif
 
 private:
     SoftRenderer& Parent;

@@ -48,6 +48,10 @@ public:
     bool Error;
 
     bool Saving;
+#ifdef REBIT_MELONDS_ROLLBACK
+    // Private frame-boundary format. Never accepted by the public savestate path.
+    bool Rollback = false;
+#endif
 
     u32 CurSection;
 

@@ -28,6 +28,7 @@
 
 namespace melonDS
 {
+class Savestate;
 struct MPStatusData
 {
     u16 ConnectedBitmask; // bitmask of which instances are ready to send/receive packets
@@ -70,6 +71,9 @@ public:
 
     std::vector<u8> SerializeState();
     bool DeserializeState(const u8* data, std::size_t length);
+#ifdef REBIT_MELONDS_ROLLBACK
+    void DoRollbackState(Savestate* file);
+#endif
 
 private:
     void FIFORead(int inst, int fifo, void* buf, int len) noexcept;

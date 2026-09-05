@@ -74,6 +74,62 @@ typedef int buf_t;
 /* probably not totally portable */
 #define SAMPLES( buf ) ((buf_t*) ((buf) + 1))
 
+#ifdef REBIT_MELONDS_ROLLBACK
+#include <stdint.h>
+
+static void state_put32(unsigned char* data, uint32_t value)
+{
+    int i;
+    for (i = 0; i < 4; ++i) data[i] = (unsigned char)(value >> (i * 8));
+}
+
+static uint32_t state_get32(const unsigned char* data)
+{
+    return (uint32_t)data[0] | ((uint32_t)data[1] << 8)
+        | ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+}
+
+int blip_state_size(const blip_t* m)
+{
+    return m ? 28 + (m->size + buf_extra) * 4 : 0;
+}
+
+int blip_state_export(const blip_t* m, unsigned char* data, int length)
+{
+    int i;
+    if (!m || !data || length != blip_state_size(m)) return 0;
+    state_put32(data, (uint32_t)m->factor);
+    state_put32(data + 4, (uint32_t)(m->factor >> 32));
+    state_put32(data + 8, (uint32_t)m->offset);
+    state_put32(data + 12, (uint32_t)(m->offset >> 32));
+    state_put32(data + 16, m->avail);
+    state_put32(data + 20, m->size);
+    state_put32(data + 24, m->integrator);
+    for (i = 0; i < m->size + buf_extra; ++i)
+        state_put32(data + 28 + i * 4, SAMPLES(m)[i]);
+    return 1;
+}
+
+int blip_state_import(blip_t* m, const unsigned char* data, int length)
+{
+    int i;
+    fixed_t factor, offset;
+    uint32_t avail;
+    if (!m || !data || length != blip_state_size(m)
+        || state_get32(data + 20) != (uint32_t)m->size) return 0;
+    factor = state_get32(data) | ((fixed_t)state_get32(data + 4) << 32);
+    offset = state_get32(data + 8) | ((fixed_t)state_get32(data + 12) << 32);
+    avail = state_get32(data + 16);
+    if (factor != m->factor || avail > (uint32_t)m->size || offset >= time_unit) return 0;
+    m->offset = offset;
+    m->avail = (int)avail;
+    m->integrator = (int32_t)state_get32(data + 24);
+    for (i = 0; i < m->size + buf_extra; ++i)
+        SAMPLES(m)[i] = (int32_t)state_get32(data + 28 + i * 4);
+    return 1;
+}
+#endif
+
 /* Arithmetic (sign-preserving) right shift */
 #define ARITH_SHIFT( n, shift ) \
 	((n) >> (shift))

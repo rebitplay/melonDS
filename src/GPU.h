@@ -841,6 +841,11 @@ public:
 
     virtual void PreSavestate() {}
     virtual void PostSavestate() {}
+#ifdef REBIT_MELONDS_ROLLBACK
+    virtual bool RollbackHealthy() const { return false; }
+    virtual void PrepareRollbackState(Savestate* file) { file->Error = true; }
+    virtual void DoRollbackState(Savestate* file) { file->Error = true; }
+#endif
 
     virtual void SetRenderSettings(RendererSettings& settings) = 0;
     virtual void SetOutputEnabled(bool enabled) { (void)enabled; }
