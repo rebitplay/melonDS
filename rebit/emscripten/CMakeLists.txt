@@ -89,7 +89,7 @@ elseif(REBIT_MELONDS_ROLLBACK)
         set(REBIT_ROLLBACK_BUILD "melonds-dual-rollback-playground-1")
         target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE REBIT_MELONDS_ROLLBACK_PLAYGROUND=1)
     else()
-        set(REBIT_ROLLBACK_BUILD "melonds-dual-rollback-experimental-2")
+        set(REBIT_ROLLBACK_BUILD "melonds-dual-rollback-experimental-3")
     endif()
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
         REBIT_MELONDS_DUAL_BUILD="${REBIT_ROLLBACK_BUILD}"
