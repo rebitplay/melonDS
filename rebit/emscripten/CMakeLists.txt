@@ -6,6 +6,10 @@ option(REBIT_MELONDS_DUAL_COOPERATIVE "Build the single-threaded cooperative Web
 option(REBIT_MELONDS_DUAL_BUILD_CLI "Build the native command-line benchmark" ON)
 option(REBIT_MELONDS_DUAL_NATIVE_JIT "Enable melonDS JIT execution in native builds" OFF)
 option(REBIT_MELONDS_ROLLBACK "Build the isolated experimental rollback runtime" OFF)
+option(REBIT_MELONDS_ROLLBACK_PLAYGROUND "Enable local-only dual-screen diagnostics" OFF)
+if(REBIT_MELONDS_ROLLBACK_PLAYGROUND AND NOT REBIT_MELONDS_ROLLBACK)
+    message(FATAL_ERROR "The playground requires the rollback runtime")
+endif()
 if(REBIT_MELONDS_ROLLBACK AND (REBIT_MELONDS_DUAL_COOPERATIVE OR REBIT_MELONDS_DUAL_NATIVE_JIT))
     message(FATAL_ERROR "Rollback currently requires the parallel interpreter runtime")
 endif()
@@ -81,8 +85,14 @@ if(REBIT_MELONDS_DUAL_COOPERATIVE)
         REBIT_MELONDS_DUAL_COOPERATIVE=1
     )
 elseif(REBIT_MELONDS_ROLLBACK)
+    if(REBIT_MELONDS_ROLLBACK_PLAYGROUND)
+        set(REBIT_ROLLBACK_BUILD "melonds-dual-rollback-playground-1")
+        target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE REBIT_MELONDS_ROLLBACK_PLAYGROUND=1)
+    else()
+        set(REBIT_ROLLBACK_BUILD "melonds-dual-rollback-experimental-2")
+    endif()
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-        REBIT_MELONDS_DUAL_BUILD="melonds-dual-rollback-experimental-2"
+        REBIT_MELONDS_DUAL_BUILD="${REBIT_ROLLBACK_BUILD}"
         REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-rollback-experimental-v1"
     )
 else()
@@ -138,7 +148,7 @@ if(EMSCRIPTEN)
         "-sEXPORT_NAME=${REBIT_MELONDS_DUAL_EXPORT_NAME}"
         "-sENVIRONMENT=worker,node"
         "-sALLOW_MEMORY_GROWTH=0"
-        "-sINITIAL_MEMORY=536870912"
+        "-sINITIAL_MEMORY=1073741824"
         "-sSTACK_SIZE=2097152"
         "-sNO_EXIT_RUNTIME=1"
         "-sDISABLE_EXCEPTION_CATCHING=0"
@@ -147,9 +157,14 @@ if(EMSCRIPTEN)
     )
 
     if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
+        set(REBIT_THREAD_POOL_SIZE 3)
+        if(REBIT_MELONDS_ROLLBACK_PLAYGROUND)
+            # Two console workers plus two live 3D renderers.
+            set(REBIT_THREAD_POOL_SIZE 4)
+        endif()
         target_link_options(melonds_dual PRIVATE
             "-pthread"
-            "-sPTHREAD_POOL_SIZE=3"
+            "-sPTHREAD_POOL_SIZE=${REBIT_THREAD_POOL_SIZE}"
         )
     endif()
 

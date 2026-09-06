@@ -107,6 +107,9 @@ struct Runtime
     std::atomic<int> multiplayerTurn {-1};
     std::atomic<std::uint32_t> multiplayerProgressSequence {0};
     int visiblePlayer = 0;
+#ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
+    bool renderAll = false;
+#endif
     bool shuttingDown = false;
     std::atomic<bool> multiplayerFrameActive {false};
     std::atomic<std::uint32_t> schedulerJitterProfile {0};
@@ -118,6 +121,14 @@ struct Runtime
 };
 
 Runtime State;
+
+bool OutputEnabledFor(int player)
+{
+#ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
+    if (State.renderAll) return true;
+#endif
+    return player == State.visiblePlayer;
+}
 
 #ifdef REBIT_MELONDS_ROLLBACK
 struct RollbackRecord
@@ -677,6 +688,9 @@ void StopRuntime()
     State.multiplayer.reset();
     State.checkpoint.clear();
     State.visiblePlayer = 0;
+#ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
+    State.renderAll = false;
+#endif
     State.generation = 0;
     State.completed = 0;
     State.shuttingDown = false;
@@ -736,7 +750,7 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
         .HiresCoordinates = false,
         .BetterPolygons = false,
     };
-    console->GetRenderer().SetOutputEnabled(slot.context.id == State.visiblePlayer);
+    console->GetRenderer().SetOutputEnabled(OutputEnabledFor(slot.context.id));
     console->GetRenderer().SetRenderSettings(rendererSettings);
     console->SPU.SetOutputEnabled(slot.context.id == State.visiblePlayer);
     console->Start();
@@ -1034,7 +1048,7 @@ REBIT_EXPORT void md_set_visible_player(int player)
         rebit::State.visiblePlayer = player;
         for (const auto& slot : rebit::State.slots)
         {
-            slot->console->GetRenderer().SetOutputEnabled(slot->context.id == player);
+            slot->console->GetRenderer().SetOutputEnabled(rebit::OutputEnabledFor(slot->context.id));
             slot->console->SPU.SetOutputEnabled(slot->context.id == player);
         }
     }
@@ -1044,6 +1058,23 @@ REBIT_EXPORT int md_visible_player()
 {
     return rebit::State.visiblePlayer;
 }
+
+#ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
+REBIT_EXPORT int md_set_render_all(int enabled)
+{
+    using namespace rebit;
+    if (!State.loaded || RollbackFaulted || !RuntimeAtCheckpointBoundary() || (enabled != 0 && enabled != 1))
+    { State.error = "NDS playground view change requires a healthy frame boundary."; return 0; }
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    if (State.renderAll == (enabled != 0)) return 1;
+    for (auto& record : RollbackRing) record.frame = UINT32_MAX;
+    State.renderAll = enabled != 0;
+    for (const auto& slot : State.slots)
+        slot->console->GetRenderer().SetOutputEnabled(OutputEnabledFor(slot->context.id));
+    // Audio remains on visiblePlayer; showing another screen must not mix it.
+    return 1;
+}
+#endif
 
 REBIT_EXPORT int md_set_input(int player, std::uint32_t keys, int touching, int touchX, int touchY)
 {

@@ -27,6 +27,10 @@ int md_player_count(void);
 
 void md_set_visible_player(int player);
 int md_visible_player(void);
+#ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
+/* Local diagnostics only; invalidates the rollback ring when changed. */
+int md_set_render_all(int enabled);
+#endif
 int md_set_input(int player, uint32_t keys, int touching, int touch_x, int touch_y);
 int md_run_frame(void);
 uint32_t md_frame(int player);
