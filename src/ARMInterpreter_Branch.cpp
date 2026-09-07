@@ -27,14 +27,14 @@ namespace ARMInterpreter
 void A_B(ARM* cpu)
 {
     s32 offset = (s32)(cpu->CurInstr << 8) >> 6;
-    cpu->JumpTo(cpu->R[15] + offset);
+    Fast::JumpTo(cpu, cpu->R[15] + offset);
 }
 
 void A_BL(ARM* cpu)
 {
     s32 offset = (s32)(cpu->CurInstr << 8) >> 6;
     cpu->R[14] = cpu->R[15] - 4;
-    cpu->JumpTo(cpu->R[15] + offset);
+    Fast::JumpTo(cpu, cpu->R[15] + offset);
 }
 
 void A_BLX_IMM(ARM* cpu)
@@ -42,18 +42,18 @@ void A_BLX_IMM(ARM* cpu)
     s32 offset = (s32)(cpu->CurInstr << 8) >> 6;
     if (cpu->CurInstr & 0x01000000) offset += 2;
     cpu->R[14] = cpu->R[15] - 4;
-    cpu->JumpTo(cpu->R[15] + offset + 1);
+    Fast::JumpTo(cpu, cpu->R[15] + offset + 1);
 }
 
 void A_BX(ARM* cpu)
 {
-    cpu->JumpTo(cpu->R[cpu->CurInstr & 0xF]);
+    Fast::JumpTo(cpu, cpu->R[cpu->CurInstr & 0xF]);
 }
 
 void A_BLX_REG(ARM* cpu)
 {
     u32 lr = cpu->R[15] - 4;
-    cpu->JumpTo(cpu->R[cpu->CurInstr & 0xF]);
+    Fast::JumpTo(cpu, cpu->R[cpu->CurInstr & 0xF]);
     cpu->R[14] = lr;
 }
 
@@ -64,15 +64,15 @@ void T_BCOND(ARM* cpu)
     if (cpu->CheckCondition((cpu->CurInstr >> 8) & 0xF))
     {
         s32 offset = (s32)(cpu->CurInstr << 24) >> 23;
-        cpu->JumpTo(cpu->R[15] + offset + 1);
+        Fast::JumpTo(cpu, cpu->R[15] + offset + 1);
     }
     else
-        cpu->AddCycles_C();
+        Fast::AddCyclesC(cpu);
 }
 
 void T_BX(ARM* cpu)
 {
-    cpu->JumpTo(cpu->R[(cpu->CurInstr >> 3) & 0xF]);
+    Fast::JumpTo(cpu, cpu->R[(cpu->CurInstr >> 3) & 0xF]);
 }
 
 void T_BLX_REG(ARM* cpu)
@@ -84,21 +84,21 @@ void T_BLX_REG(ARM* cpu)
     }
 
     u32 lr = cpu->R[15] - 1;
-    cpu->JumpTo(cpu->R[(cpu->CurInstr >> 3) & 0xF]);
+    Fast::JumpTo(cpu, cpu->R[(cpu->CurInstr >> 3) & 0xF]);
     cpu->R[14] = lr;
 }
 
 void T_B(ARM* cpu)
 {
     s32 offset = (s32)((cpu->CurInstr & 0x7FF) << 21) >> 20;
-    cpu->JumpTo(cpu->R[15] + offset + 1);
+    Fast::JumpTo(cpu, cpu->R[15] + offset + 1);
 }
 
 void T_BL_LONG_1(ARM* cpu)
 {
     s32 offset = (s32)((cpu->CurInstr & 0x7FF) << 21) >> 9;
     cpu->R[14] = cpu->R[15] + offset;
-    cpu->AddCycles_C();
+    Fast::AddCyclesC(cpu);
 }
 
 void T_BL_LONG_2(ARM* cpu)
@@ -110,7 +110,7 @@ void T_BL_LONG_2(ARM* cpu)
     if ((cpu->Num==1) || (cpu->CurInstr & (1<<12)))
         pc |= 1;
 
-    cpu->JumpTo(pc);
+    Fast::JumpTo(cpu, pc);
 }
 
 

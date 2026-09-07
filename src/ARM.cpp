@@ -567,7 +567,11 @@ void ARMv5::Execute()
 
             // actually execute
             u32 icode = (CurInstr >> 6) & 0x3FF;
+#ifdef __EMSCRIPTEN__
+            ARMInterpreter::DispatchTHUMB(this, icode);
+#else
             ARMInterpreter::THUMBInstrTable[icode](this);
+#endif
         }
         else
         {
@@ -581,7 +585,11 @@ void ARMv5::Execute()
             if (CheckCondition(CurInstr >> 28))
             {
                 u32 icode = ((CurInstr >> 4) & 0xF) | ((CurInstr >> 16) & 0xFF0);
+#ifdef __EMSCRIPTEN__
+                ARMInterpreter::DispatchARM(this, icode);
+#else
                 ARMInterpreter::ARMInstrTable[icode](this);
+#endif
             }
             else if ((CurInstr & 0xFE000000) == 0xFA000000)
             {
@@ -716,7 +724,11 @@ void ARMv4::Execute()
 
             // actually execute
             u32 icode = (CurInstr >> 6);
+#ifdef __EMSCRIPTEN__
+            ARMInterpreter::DispatchTHUMB(this, icode);
+#else
             ARMInterpreter::THUMBInstrTable[icode](this);
+#endif
         }
         else
         {
@@ -730,7 +742,11 @@ void ARMv4::Execute()
             if (CheckCondition(CurInstr >> 28))
             {
                 u32 icode = ((CurInstr >> 4) & 0xF) | ((CurInstr >> 16) & 0xFF0);
+#ifdef __EMSCRIPTEN__
+                ARMInterpreter::DispatchARM(this, icode);
+#else
                 ARMInterpreter::ARMInstrTable[icode](this);
+#endif
             }
             else
                 AddCycles_C();

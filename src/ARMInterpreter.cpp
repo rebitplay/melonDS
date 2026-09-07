@@ -40,7 +40,7 @@ void A_UNK(ARM* cpu)
 
     cpu->R_UND[2] = oldcpsr;
     cpu->R[14] = cpu->R[15] - 4;
-    cpu->JumpTo(cpu->ExceptionBase + 0x04);
+    Fast::JumpTo(cpu, cpu->ExceptionBase + 0x04);
 }
 
 void T_UNK(ARM* cpu)
@@ -54,7 +54,7 @@ void T_UNK(ARM* cpu)
 
     cpu->R_UND[2] = oldcpsr;
     cpu->R[14] = cpu->R[15] - 2;
-    cpu->JumpTo(cpu->ExceptionBase + 0x04);
+    Fast::JumpTo(cpu, cpu->ExceptionBase + 0x04);
 }
 
 
@@ -98,7 +98,7 @@ void A_MSR_IMM(ARM* cpu)
     if (!(cpu->CurInstr & (1<<22)))
         cpu->UpdateMode(oldpsr, cpu->CPSR);
 
-    cpu->AddCycles_C();
+    Fast::AddCyclesC(cpu);
 }
 
 void A_MSR_REG(ARM* cpu)
@@ -140,7 +140,7 @@ void A_MSR_REG(ARM* cpu)
     if (!(cpu->CurInstr & (1<<22)))
         cpu->UpdateMode(oldpsr, cpu->CPSR);
 
-    cpu->AddCycles_C();
+    Fast::AddCyclesC(cpu);
 }
 
 void A_MRS(ARM* cpu)
@@ -162,7 +162,7 @@ void A_MRS(ARM* cpu)
         psr = cpu->CPSR;
 
     cpu->R[(cpu->CurInstr>>12) & 0xF] = psr;
-    cpu->AddCycles_C();
+    Fast::AddCyclesC(cpu);
 }
 
 
@@ -188,7 +188,7 @@ void A_MCR(ARM* cpu)
         return A_UNK(cpu); // TODO: check what kind of exception it really is
     }
 
-    cpu->AddCycles_CI(1 + 1); // TODO: checkme
+    Fast::AddCyclesCI(cpu, 1 + 1); // TODO: checkme
 }
 
 void A_MRC(ARM* cpu)
@@ -213,7 +213,7 @@ void A_MRC(ARM* cpu)
         return A_UNK(cpu); // TODO: check what kind of exception it really is
     }
 
-    cpu->AddCycles_CI(2 + 1); // TODO: checkme
+    Fast::AddCyclesCI(cpu, 2 + 1); // TODO: checkme
 }
 
 
@@ -227,7 +227,7 @@ void A_SVC(ARM* cpu)
 
     cpu->R_SVC[2] = oldcpsr;
     cpu->R[14] = cpu->R[15] - 4;
-    cpu->JumpTo(cpu->ExceptionBase + 0x08);
+    Fast::JumpTo(cpu, cpu->ExceptionBase + 0x08);
 }
 
 void T_SVC(ARM* cpu)
@@ -239,7 +239,7 @@ void T_SVC(ARM* cpu)
 
     cpu->R_SVC[2] = oldcpsr;
     cpu->R[14] = cpu->R[15] - 2;
-    cpu->JumpTo(cpu->ExceptionBase + 0x08);
+    Fast::JumpTo(cpu, cpu->ExceptionBase + 0x08);
 }
 
 
@@ -249,3 +249,7 @@ void T_SVC(ARM* cpu)
 #undef INSTRFUNC_PROTO
 
 }
+
+#ifdef __EMSCRIPTEN__
+#include "ARM_InstrDispatch.h"
+#endif

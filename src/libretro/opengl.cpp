@@ -41,7 +41,9 @@ static bool setup_opengl(void)
 
    glBindAttribLocation(shader[2], 0, "vPosition");
    glBindAttribLocation(shader[2], 1, "vTexcoord");
+   #ifndef MELONDS_WEBGL
    glBindFragDataLocation(shader[2], 0, "oColor");
+   #endif
 
    if (!OpenGL::LinkShaderProgram(shader))
       return false;
@@ -131,10 +133,14 @@ bool initialize_opengl()
 {
    glsm_ctx_params_t params = {0};
 
-   // melonds wants an opengl 3.1 context, so glcore is required for mesa compatibility
+#ifdef MELONDS_WEBGL
+   params.context_type     = RETRO_HW_CONTEXT_OPENGLES3;
+#else
+   // melonDS wants an OpenGL 3.1 context on native frontends.
    params.context_type     = RETRO_HW_CONTEXT_OPENGL_CORE;
    params.major            = 3;
    params.minor            = 1;
+#endif
    params.context_reset    = context_reset;
    params.context_destroy  = context_destroy;
    params.environ_cb       = environ_cb;
@@ -171,9 +177,7 @@ void setup_opengl_frame_state(void)
    GL_ShaderConfig.cursorPos[3] = -1.0f;
 
    glBindBuffer(GL_UNIFORM_BUFFER, ubo);
-   void* unibuf = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
-   if (unibuf) memcpy(unibuf, &GL_ShaderConfig, sizeof(GL_ShaderConfig));
-   glUnmapBuffer(GL_UNIFORM_BUFFER);
+   glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(GL_ShaderConfig), &GL_ShaderConfig);
 
    float screen_width = (float)screen_layout_data.screen_width;
    float screen_height = (float)screen_layout_data.screen_height;
@@ -380,9 +384,7 @@ void render_opengl_frame(bool sw)
       GL_ShaderConfig.cursorPos[3] = (((float)(input_state.touch_y) + (float)(CURSOR_SIZE)) / ((float)VIDEO_WIDTH * 1.5)) + 0.5f;
 
       glBindBuffer(GL_UNIFORM_BUFFER, ubo);
-      void* unibuf = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
-      if (unibuf) memcpy(unibuf, &GL_ShaderConfig, sizeof(GL_ShaderConfig));
-      glUnmapBuffer(GL_UNIFORM_BUFFER);
+      glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(GL_ShaderConfig), &GL_ShaderConfig);
    }
 
    OpenGL::UseShaderProgram(shader);
@@ -420,7 +422,9 @@ void render_opengl_frame(bool sw)
    glBindVertexArray(vao);
    glDrawArrays(GL_TRIANGLES, 0, screen_layout_data.hybrid_small_screen == SmallScreenLayout::SmallScreenDuplicate ? 18 : 12);
 
+#ifndef MELONDS_WEBGL
    glFlush();
+#endif
 
    glsm_ctl(GLSM_CTL_STATE_UNBIND, NULL);
 

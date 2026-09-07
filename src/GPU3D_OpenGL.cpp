@@ -24,9 +24,85 @@
 #include "GPU.h"
 #include "Config.h"
 #include "GPU3D_OpenGL_shaders.h"
+#ifdef MELONDS_WEBGL
+#undef FILE
+#include <emscripten.h>
+#define FILE RFILE
+EM_JS(void, melonds_webgl_color_maski, (unsigned index, int r, int g, int b, int a), {
+    const context = GL.currentContext;
+    const gl = context && context.GLctx;
+    if (gl && context.melondsDrawBuffersContext !== gl)
+    {
+        context.melondsDrawBuffersContext = gl;
+        context.melondsDrawBuffersIndexed = gl.getExtension("OES_draw_buffers_indexed") || null;
+    }
+    const ext = context && context.melondsDrawBuffersIndexed;
+    if (ext) ext.colorMaskiOES(index, !!r, !!g, !!b, !!a);
+    else if (index === 0) gl.colorMask(!!r, !!g, !!b, !!a);
+});
+static unsigned WebGLColorMaskState[2] = {16, 16};
+static inline void melonds_webgl_cached_color_maski(unsigned index, int r, int g, int b, int a)
+{
+    const unsigned state = !!r | (!!g << 1) | (!!b << 2) | (!!a << 3);
+    if (index < 2 && WebGLColorMaskState[index] == state) return;
+    melonds_webgl_color_maski(index, r, g, b, a);
+    if (index < 2) WebGLColorMaskState[index] = state;
+}
+static inline void melonds_webgl_reset_color_mask_cache()
+{
+    WebGLColorMaskState[0] = WebGLColorMaskState[1] = 16;
+}
+EM_JS(void, melonds_webgl_read_buffer, (unsigned mode), {
+    const gl = GL.currentContext && GL.currentContext.GLctx;
+    if (gl) gl.readBuffer(mode);
+});
+EM_JS(void, melonds_webgl_draw_buffers, (int count, const GLenum* buffers), {
+    const gl = GL.currentContext && GL.currentContext.GLctx;
+    if (gl) gl.drawBuffers(Array.from(HEAPU32.subarray(buffers >> 2, (buffers >> 2) + count)));
+});
+EM_JS(void, melonds_webgl_blit_framebuffer, (int sx0, int sy0, int sx1, int sy1,
+        int dx0, int dy0, int dx1, int dy1, unsigned mask, unsigned filter), {
+    const gl = GL.currentContext && GL.currentContext.GLctx;
+    if (gl) gl.blitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter);
+});
+EM_JS(void, melonds_webgl_read_pixels, (int x, int y, int width, int height,
+        unsigned format, unsigned type, void* pixels), {
+    const gl = GL.currentContext && GL.currentContext.GLctx;
+    if (gl) gl.readPixels(x, y, width, height, format, type,
+        pixels ? HEAPU8.subarray(pixels, pixels + width * height * 4) : null);
+});
+EM_JS(void, melonds_webgl_vertex_attrib_i_pointer, (unsigned index, int size, unsigned type, int stride, void* pointer), {
+    const gl = GL.currentContext && GL.currentContext.GLctx;
+    if (!gl) return;
+    if (index === 3) type = gl.INT;
+    gl.vertexAttribIPointer(index, size, type, stride, pointer);
+});
+#define GL_UNSIGNED_SHORT_1_5_5_5_REV GL_UNSIGNED_SHORT_5_5_5_1
+#undef glVertexAttribIPointer
+#define glVertexAttribIPointer melonds_webgl_vertex_attrib_i_pointer
+#undef glColorMaski
+#define glColorMaski melonds_webgl_cached_color_maski
+#undef glReadBuffer
+#define glReadBuffer melonds_webgl_read_buffer
+#undef glDrawBuffers
+#define glDrawBuffers melonds_webgl_draw_buffers
+#undef glBlitFramebuffer
+#define glBlitFramebuffer melonds_webgl_blit_framebuffer
+#undef glReadPixels
+#define glReadPixels melonds_webgl_read_pixels
+#endif
 
 namespace GPU3D
 {
+
+#ifdef MELONDS_WEBGL
+static u32 WebGLPalette[1024 * 8];
+
+static inline u8 ExpandPalette5(u16 value)
+{
+    return (u8)((value << 3) | (value >> 2));
+}
+#endif
 
 bool GLRenderer::BuildRenderShader(u32 flags, const char* vs, const char* fs)
 {
@@ -62,8 +138,12 @@ bool GLRenderer::BuildRenderShader(u32 flags, const char* vs, const char* fs)
     glBindAttribLocation(prog, 1, "vColor");
     glBindAttribLocation(prog, 2, "vTexcoord");
     glBindAttribLocation(prog, 3, "vPolygonAttr");
+    #ifndef MELONDS_WEBGL
     glBindFragDataLocation(prog, 0, "oColor");
+    #endif
+    #ifndef MELONDS_WEBGL
     glBindFragDataLocation(prog, 1, "oAttr");
+    #endif
 
     if (!OpenGL::LinkShaderProgram(RenderShader[flags]))
         return false;
@@ -117,8 +197,12 @@ bool GLRenderer::Init()
         return false;
 
     glBindAttribLocation(ClearShaderPlain[2], 0, "vPosition");
+    #ifndef MELONDS_WEBGL
     glBindFragDataLocation(ClearShaderPlain[2], 0, "oColor");
+    #endif
+    #ifndef MELONDS_WEBGL
     glBindFragDataLocation(ClearShaderPlain[2], 1, "oAttr");
+    #endif
 
     if (!OpenGL::LinkShaderProgram(ClearShaderPlain))
         return false;
@@ -154,7 +238,9 @@ bool GLRenderer::Init()
         return false;
 
     glBindAttribLocation(FinalPassEdgeShader[2], 0, "vPosition");
+    #ifndef MELONDS_WEBGL
     glBindFragDataLocation(FinalPassEdgeShader[2], 0, "oColor");
+    #endif
 
     if (!OpenGL::LinkShaderProgram(FinalPassEdgeShader))
         return false;
@@ -170,7 +256,9 @@ bool GLRenderer::Init()
     glUniform1i(uni_id, 1);
 
     glBindAttribLocation(FinalPassFogShader[2], 0, "vPosition");
+    #ifndef MELONDS_WEBGL
     glBindFragDataLocation(FinalPassFogShader[2], 0, "oColor");
+    #endif
 
     if (!OpenGL::LinkShaderProgram(FinalPassFogShader))
         return false;
@@ -281,7 +369,11 @@ bool GLRenderer::Init()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+#ifdef MELONDS_WEBGL
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1024, 48, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 1024, 48, 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, NULL);
+#endif
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -340,20 +432,20 @@ void GLRenderer::SetRenderSettings(GPU::RenderSettings& settings)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, ScreenW, ScreenH, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
 
     glBindFramebuffer(GL_FRAMEBUFFER, FramebufferID[3]);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, FramebufferTex[3], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, FramebufferTex[3], 0);
 
     GLenum fbassign[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
 
     glBindFramebuffer(GL_FRAMEBUFFER, FramebufferID[0]);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, FramebufferTex[0], 0);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, FramebufferTex[4], 0);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, FramebufferTex[5], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, FramebufferTex[0], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, FramebufferTex[4], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, FramebufferTex[5], 0);
     glDrawBuffers(2, fbassign);
 
     glBindFramebuffer(GL_FRAMEBUFFER, FramebufferID[1]);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, FramebufferTex[1], 0);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, FramebufferTex[6], 0);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, FramebufferTex[7], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, FramebufferTex[1], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, FramebufferTex[6], 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, FramebufferTex[7], 0);
     glDrawBuffers(2, fbassign);
 
     glBindFramebuffer(GL_FRAMEBUFFER, FramebufferID[0]);
@@ -481,7 +573,9 @@ void GLRenderer::BuildPolygons(GLRenderer::RendererPolygon* polygons, int npolys
     u32 vidx = 0;
 
     u32 iidx = 0;
+#ifndef MELONDS_WEBGL
     u32 eidx = EdgeIndicesOffset;
+#endif
 
     for (int i = 0; i < npolys; i++)
     {
@@ -676,6 +770,7 @@ void GLRenderer::BuildPolygons(GLRenderer::RendererPolygon* polygons, int npolys
             }
         }
 
+#ifndef MELONDS_WEBGL
         rp->EdgeIndicesOffset = eidx;
         rp->NumEdgeIndices = 0;
 
@@ -690,11 +785,14 @@ void GLRenderer::BuildPolygons(GLRenderer::RendererPolygon* polygons, int npolys
         IndexBuffer[eidx++] = vidx_cur;
         IndexBuffer[eidx++] = vidx_first;
         rp->NumEdgeIndices += 2;
+#endif
     }
 
     NumVertices = vidx;
     NumIndices = iidx;
+#ifndef MELONDS_WEBGL
     NumEdgeIndices = eidx - EdgeIndicesOffset;
+#endif
 }
 
 int GLRenderer::RenderSinglePolygon(int i)
@@ -1116,6 +1214,24 @@ void GLRenderer::RenderFrame()
 {
     CurShaderID = -1;
 
+#ifdef MELONDS_WEBGL
+    melonds_webgl_reset_color_mask_cache();
+#endif
+
+    const auto textureDirty = GPU::VRAMDirty_Texture.DeriveState(GPU::VRAMMap_Texture);
+    const auto texPalDirty = GPU::VRAMDirty_TexPal.DeriveState(GPU::VRAMMap_TexPal);
+    if (RenderFrameIdentical)
+    {
+        bool textureChanged = false;
+        for (u64 bits : textureDirty.Data) textureChanged |= bits != 0;
+
+        bool texPalChanged = false;
+        for (u64 bits : texPalDirty.Data) texPalChanged |= bits != 0;
+
+        if (!textureChanged && !texPalChanged)
+            return;
+    }
+
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, FramebufferID[FrontBuffer]);
 
@@ -1170,12 +1286,8 @@ void GLRenderer::RenderFrame()
     ShaderConfig.uFogShift = RenderFogShift;
 
     glBindBuffer(GL_UNIFORM_BUFFER, ShaderConfigUBO);
-    void* unibuf = glMapBuffer(GL_UNIFORM_BUFFER, GL_WRITE_ONLY);
-    if (unibuf) memcpy(unibuf, &ShaderConfig, sizeof(ShaderConfig));
-    glUnmapBuffer(GL_UNIFORM_BUFFER);
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ShaderConfig), &ShaderConfig);
 
-    // SUCKY!!!!!!!!!!!!!!!!!!
-    // TODO: detect when VRAM blocks are modified!
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, TexMemID);
     for (int i = 0; i < 4; i++)
@@ -1188,6 +1300,9 @@ void GLRenderer::RenderFrame()
         else if (mask & (1<<2)) vram = GPU::VRAM_C;
         else if (mask & (1<<3)) vram = GPU::VRAM_D;
 
+        if (!(textureDirty.Data[i * 4] | textureDirty.Data[i * 4 + 1]
+            | textureDirty.Data[i * 4 + 2] | textureDirty.Data[i * 4 + 3]))
+            continue;
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, i*128, 1024, 128, GL_RED_INTEGER, GL_UNSIGNED_BYTE, vram);
     }
 
@@ -1203,7 +1318,22 @@ void GLRenderer::RenderFrame()
         else if (mask & (1<<5)) vram = GPU::VRAM_F;
         else if (mask & (1<<6)) vram = GPU::VRAM_G;
 
+        if (!(texPalDirty.Data[i / 2] >> ((i & 1) * 32) & 0xFFFFFFFFULL))
+            continue;
+#ifdef MELONDS_WEBGL
+        const u16* colors = (const u16*)vram;
+        for (int j = 0; j < 1024 * 8; j++)
+        {
+            u16 color = colors[j];
+            WebGLPalette[j] = ExpandPalette5(color & 0x1F)
+                | ((u32)ExpandPalette5((color >> 5) & 0x1F) << 8)
+                | ((u32)ExpandPalette5((color >> 10) & 0x1F) << 16)
+                | ((color & 0x8000) ? 0xFF000000 : 0);
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, i*8, 1024, 8, GL_RGBA, GL_UNSIGNED_BYTE, WebGLPalette);
+#else
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, i*8, 1024, 8, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, vram);
+#endif
     }
 
     glDisable(GL_SCISSOR_TEST);
@@ -1279,7 +1409,9 @@ void GLRenderer::RenderFrame()
         // bind to access the index buffer
         glBindVertexArray(VertexArrayID);
         glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, NumIndices * 2, IndexBuffer);
+#ifndef MELONDS_WEBGL
         glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, EdgeIndicesOffset * 2, NumEdgeIndices * 2, IndexBuffer + EdgeIndicesOffset);
+#endif
 
         RenderSceneChunk(0, 192);
     }
@@ -1292,14 +1424,31 @@ void GLRenderer::PrepareCaptureFrame()
     // TODO: make sure this picks the right buffer when doing antialiasing
     int original_fb = FrontBuffer^1;
 
+#ifdef MELONDS_WEBGL
+    if (ScreenW == 256)
+    {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, FramebufferID[original_fb]);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glReadPixels(0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, &Framebuffer[0]);
+        return;
+    }
+#endif
+
     glBindFramebuffer(GL_READ_FRAMEBUFFER, FramebufferID[original_fb]);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, FramebufferID[3]);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
+    glDrawBuffers(1, &draw_buffer);
     glBlitFramebuffer(0, 0, ScreenW, ScreenH, 0, 0, 256, 192, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, FramebufferID[3]);
-    glReadPixels(0, 0, 256, 192, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+#ifdef MELONDS_WEBGL
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glReadPixels(0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, &Framebuffer[0]);
+#else
+    glReadPixels(0, 0, 256, 192, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+#endif
 }
 
 u32* GLRenderer::GetLine(int line)
@@ -1308,9 +1457,9 @@ u32* GLRenderer::GetLine(int line)
 
     if (line == 0)
     {
-        u8* data = (u8*)glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
-        if (data) memcpy(&Framebuffer[stride*0], data, 4*stride*192);
-        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+#ifndef MELONDS_WEBGL
+        glGetBufferSubData(GL_PIXEL_PACK_BUFFER, 0, 4*stride*192, &Framebuffer[stride*0]);
+#endif
     }
 
     u64* ptr = (u64*)&Framebuffer[stride * line];

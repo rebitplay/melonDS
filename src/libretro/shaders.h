@@ -16,7 +16,10 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
-const char* vertex_shader = R"(#version 140
+const char* vertex_shader = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp usampler2D;
 layout(std140) uniform uConfig
 {
     vec2 uScreenSize;
@@ -31,7 +34,7 @@ void main()
 {
     vec4 fpos;
     fpos.xy = ((pos * 2.0) / uScreenSize) - 1.0;
-    fpos.y *= -1;
+    fpos.y *= -1.0;
     fpos.z = 0.0;
     fpos.w = 1.0;
     gl_Position = fpos;
@@ -39,7 +42,10 @@ void main()
 }
 )";
 
-const char* fragment_shader = R"(#version 140
+const char* fragment_shader = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp usampler2D;
 layout(std140) uniform uConfig
 {
     vec2 uScreenSize;
@@ -52,7 +58,7 @@ uniform sampler2D ScreenTex;
 
 smooth in vec2 fTexcoord;
 
-out vec4 oColor;
+layout(location = 0) out vec4 oColor;
 
 void main()
 {

@@ -28,6 +28,11 @@ namespace ARMInterpreter
 extern void (*ARMInstrTable[4096])(ARM* cpu);
 extern void (*THUMBInstrTable[1024])(ARM* cpu);
 
+#ifdef __EMSCRIPTEN__
+void DispatchARM(ARM* cpu, u32 code);
+void DispatchTHUMB(ARM* cpu, u32 code);
+#endif
+
 void A_MSR_IMM(ARM* cpu);
 void A_MSR_REG(ARM* cpu);
 void A_MRS(ARM* cpu);
