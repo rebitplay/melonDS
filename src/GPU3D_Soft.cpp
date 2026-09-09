@@ -158,6 +158,10 @@ void SoftRenderer3D::Reset()
     if (!WaitForRollbackRender()) return;
 #endif
     TextureCache.Reset();
+#ifdef REBIT_MELONDS_REUSE_RASTER
+    ReuseRaster = false;
+    RasterValid = false;
+#endif
     memset(ColorBuffer, 0, BufferSize * 2 * 4);
     memset(DepthBuffer, 0, BufferSize * 2 * 4);
     memset(AttrBuffer, 0, BufferSize * 2 * 4);
@@ -173,6 +177,10 @@ void SoftRenderer3D::Reset()
 void SoftRenderer3D::InvalidateTextureCache()
 {
     TextureCache.Reset();
+#ifdef REBIT_MELONDS_REUSE_RASTER
+    ReuseRaster = false;
+    RasterValid = false;
+#endif
 }
 
 #ifdef REBIT_MELONDS_ROLLBACK
@@ -218,6 +226,10 @@ void SoftRenderer3D::DoRollbackState(Savestate* file)
     if (!file->Saving)
     {
         TextureCache.Reset();
+#ifdef REBIT_MELONDS_REUSE_RASTER
+        ReuseRaster = false;
+        RasterValid = false;
+#endif
         if (Threaded)
         {
             Platform::Semaphore_Reset(Sema_ScanlineCount);
@@ -1947,6 +1959,12 @@ void SoftRenderer3D::ClearBuffers()
 
 void SoftRenderer3D::RenderPolygons(bool threaded, Polygon** polygons, int npolys)
 {
+#ifdef REBIT_MELONDS_BATCH_RENDER_SCANLINES
+    constexpr int scanlineBatch = 8;
+#else
+    constexpr int scanlineBatch = 1;
+#endif
+    static_assert(192 % scanlineBatch == 0);
     const int polygonCount = SetupPolygonList(PolygonList, polygons, npolys, 0);
 
     RenderScanline(PolygonList, 0, polygonCount);
@@ -1954,13 +1972,15 @@ void SoftRenderer3D::RenderPolygons(bool threaded, Polygon** polygons, int npoly
     {
         RenderScanline(PolygonList, y, polygonCount);
         ScanlineFinalPass(y - 1);
-        if (threaded)
-            Platform::Semaphore_Post(Sema_ScanlineCount);
+        // Publish only completed final-pass rows. The consumer still takes one
+        // token per row; batching changes host wakeups, not pixel/guest timing.
+        if (threaded && y % scanlineBatch == 0)
+            Platform::Semaphore_Post(Sema_ScanlineCount, scanlineBatch);
     }
 
     ScanlineFinalPass(191);
     if (threaded)
-        Platform::Semaphore_Post(Sema_ScanlineCount);
+        Platform::Semaphore_Post(Sema_ScanlineCount, scanlineBatch);
 }
 
 void SoftRenderer3D::FinishRendering()
@@ -1978,7 +1998,18 @@ void SoftRenderer3D::RenderFrame()
 {
     u8 clearBitmapDirty = 0;
     const bool textureChanged = TextureCache.Update(clearBitmapDirty);
+#ifdef REBIT_MELONDS_REUSE_RASTER
+    // Same eligibility as upstream's raster shortcut, but this derived warm-
+    // cache decision is never allowed to alter serialized reference metadata.
+    ReuseRaster = RasterValid && !textureChanged && GPU3D.RenderFrameIdentical;
+#endif
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    // Restoring invalidates decoded textures. Do the same raster work with a
+    // cold or warm cache; no derived-cache byte exemptions in this reference.
+    FrameIdentical = false;
+#else
     FrameIdentical = !textureChanged && GPU3D.RenderFrameIdentical;
+#endif
 
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {
@@ -1989,10 +2020,17 @@ void SoftRenderer3D::RenderFrame()
         Platform::Semaphore_Post(Sema_RenderStart);
 #endif
     }
-    else if (!FrameIdentical)
+    else if (!FrameIdentical
+#ifdef REBIT_MELONDS_REUSE_RASTER
+        && !ReuseRaster
+#endif
+    )
     {
         ClearBuffers();
         RenderPolygons(false, &GPU3D.RenderPolygonRAM[0], GPU3D.RenderNumPolygons);
+#ifdef REBIT_MELONDS_REUSE_RASTER
+        RasterValid = true;
+#endif
     }
 }
 
@@ -2017,7 +2055,11 @@ void SoftRenderer3D::RenderThreadFunc()
         // the ensuing race conditions may cause a crash
         // (since some of the GPU state includes pointers).
         RenderThreadRendering = true;
-        if (FrameIdentical)
+        if (FrameIdentical
+#ifdef REBIT_MELONDS_REUSE_RASTER
+            || ReuseRaster
+#endif
+        )
         { // If no rendering is needed, just say we're done.
             Platform::Semaphore_Post(Sema_ScanlineCount, 192);
         }
@@ -2025,6 +2067,9 @@ void SoftRenderer3D::RenderThreadFunc()
         {
             ClearBuffers();
             RenderPolygons(true, &GPU3D.RenderPolygonRAM[0], GPU3D.RenderNumPolygons);
+#ifdef REBIT_MELONDS_REUSE_RASTER
+            RasterValid = true;
+#endif
         }
 
         // Tell the main thread that we're done rendering

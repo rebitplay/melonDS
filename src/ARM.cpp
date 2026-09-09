@@ -1431,6 +1431,21 @@ u16 ARMv4::BusRead16(u32 addr)
 #endif
 }
 
+#ifdef REBIT_MELONDS_ARM7_FAST_FETCH
+// Fetch uses the live mapping on every access; no cache/invalidation state.
+// Other regions and DSi retain the original reader and address semantics.
+u32 ARMv4::CodeRead32(u32 addr)
+{
+    if ((addr & 0xFF800000U) == 0x03000000U && NDS.ConsoleType == 0)
+    {
+        if (NDS.SWRAM_ARM7.Mem)
+            return *(u32*)&NDS.SWRAM_ARM7.Mem[addr & NDS.SWRAM_ARM7.Mask & ~3U];
+        return *(u32*)&NDS.ARM7WRAM[addr & (NDS.ARM7WRAMSize - 1) & ~3U];
+    }
+    return BusRead32(addr);
+}
+#endif
+
 u32 ARMv4::BusRead32(u32 addr)
 {
 #ifdef REBIT_MELONDS_NDS_ONLY

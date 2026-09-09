@@ -397,10 +397,14 @@ public:
         return BusRead16(addr);
     }
 
+#ifdef REBIT_MELONDS_ARM7_FAST_FETCH
+    u32 CodeRead32(u32 addr);
+#else
     u32 CodeRead32(u32 addr)
     {
         return BusRead32(addr);
     }
+#endif
 
     void DataRead8(u32 addr, u32* val) override;
     void DataRead16(u32 addr, u32* val) override;

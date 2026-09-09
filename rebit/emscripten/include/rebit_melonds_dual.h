@@ -43,6 +43,12 @@ int md_audio_sample_rate(void);
 int md_audio_available(void);
 int md_audio_read(int maximum_frames);
 const int16_t* md_audio_buffer(void);
+#ifdef REBIT_MELONDS_DETERMINISTIC
+/* Latest completed frame only; consumed from a presentation copy, not SPU state.
+ * Consume after each md_run_frame. Restore clears these copies; replay regenerates
+ * them. Selecting a visible seat does not invalidate deterministic snapshots. */
+int md_audio_read_player(int player, int maximum_frames);
+#endif
 
 uint32_t md_save_size(int player);
 const uint8_t* md_save_data(int player);

@@ -85,6 +85,13 @@ struct Slot
 #endif
     InputState input;
     std::array<std::uint32_t, ScreenWidth * CombinedHeight> framebuffer {};
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    // Presentation-only copy of the latest frame's audio. Frontend reads must
+    // never advance one replica's emulated SPU queue but not another's.
+    std::array<std::int16_t, AudioScratchFrames * 2> frameAudio {};
+    int frameAudioCount = 0;
+    int frameAudioRead = 0;
+#endif
     std::uint64_t observedGeneration = 0;
     int multiplayerPacketReceivePolls = 0;
     int multiplayerHostReceivePolls = 0;
@@ -124,10 +131,67 @@ Runtime State;
 
 bool OutputEnabledFor(int player)
 {
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    return true;
+#endif
 #ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
     if (State.renderAll) return true;
 #endif
     return player == State.visiblePlayer;
+}
+
+bool AudioOutputEnabledFor(int player)
+{
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    return true;
+#else
+    return player == State.visiblePlayer;
+#endif
+}
+
+#ifdef REBIT_MELONDS_DETERMINISTIC
+void ClearPresentationAudio()
+{
+    for (auto& slot : State.slots)
+        slot->frameAudioCount = slot->frameAudioRead = 0;
+}
+
+void DoDeterministicRuntimeState(melonDS::Savestate* file)
+{
+    file->Section("RTIM");
+    auto sequence = State.multiplayerReplySequence.load(std::memory_order_acquire);
+    file->Var64(&sequence);
+    if (!file->Saving) State.multiplayerReplySequence.store(sequence, std::memory_order_release);
+    for (auto& slot : State.slots)
+    {
+        file->Var32(&slot->input.keys);
+        file->VarBool(&slot->input.touching);
+        file->Var16(&slot->input.touchX);
+        file->Var16(&slot->input.touchY);
+        auto& context = slot->context;
+        file->Var64(&context.packetsSent);
+        file->Var64(&context.packetsReceived);
+        file->Var64(&context.commands);
+        file->Var64(&context.replies);
+        file->Var64(&context.multiplayerCalls);
+        file->Var64(&context.replyBaseline);
+        file->VarBool(&context.awaitingReplies);
+    }
+    // Per-frame turn/done/poll counters are reset by BeginMultiplayerFrame.
+    // Host view, audio delivery cursors, jitter and wall-clock metrics are not
+    // simulation state. Checkpoints are accepted only at joint frame boundaries.
+}
+#endif
+
+void DoMultiplayerRollbackState(melonDS::Savestate* file)
+{
+#ifdef REBIT_MELONDS_ROLLBACK
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    // LocalMP finishes the stream; runtime metadata must precede it.
+    DoDeterministicRuntimeState(file);
+#endif
+    State.multiplayer->DoRollbackState(file);
+#endif
 }
 
 #ifdef REBIT_MELONDS_ROLLBACK
@@ -159,7 +223,7 @@ int NextMultiplayerTurn(int current, std::uint32_t doneMask)
 void NotifyMultiplayerProgress()
 {
     State.multiplayerProgressSequence.fetch_add(1, std::memory_order_release);
-#ifndef __EMSCRIPTEN__
+#if !defined(__EMSCRIPTEN__) || defined(REBIT_MELONDS_ADAPTIVE_WAIT)
     State.multiplayerProgressSequence.notify_all();
 #endif
 }
@@ -170,10 +234,23 @@ void WaitForMultiplayerProgress(std::uint32_t observedSequence)
     (void)observedSequence;
 #else
 #ifdef __EMSCRIPTEN__
+#ifdef REBIT_MELONDS_ADAPTIVE_WAIT
+    // Keep short local handoffs cheap, but release the CPU if the turn owner
+    // is delayed (for example while rasterizing). Atomic wait closes the
+    // notify-before-wait race; cancellation also increments/notifies sequence.
+    for (int attempt = 0; attempt < 2048; ++attempt)
+    {
+        if (!State.multiplayerFrameActive.load(std::memory_order_acquire)
+            || State.multiplayerProgressSequence.load(std::memory_order_acquire) != observedSequence)
+            return;
+    }
+    State.multiplayerProgressSequence.wait(observedSequence, std::memory_order_acquire);
+#else
     while (State.multiplayerFrameActive.load(std::memory_order_acquire)
         && State.multiplayerProgressSequence.load(std::memory_order_acquire) == observedSequence)
     {
     }
+#endif
     return;
 #else
     // Most LocalMP turns are handed off within a few scheduler yields. Keep
@@ -542,6 +619,9 @@ bool ImportCheckpoint(std::uint8_t* data, std::uint32_t length)
         slot.context.awaitingReplies = slots[player].awaitingReplies;
         CopyFramebuffer(slot);
     }
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    ClearPresentationAudio();
+#endif
     State.multiplayerReplySequence.store(replySequence, std::memory_order_release);
 #ifdef REBIT_MELONDS_ROLLBACK
     RollbackFaulted = false;
@@ -742,7 +822,7 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
 
     melonDS::RendererSettings rendererSettings {
         .ScaleFactor = 1,
-#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+#if defined(REBIT_MELONDS_DUAL_COOPERATIVE) || (defined(REBIT_MELONDS_DETERMINISTIC) && !defined(REBIT_MELONDS_DETERMINISTIC_THREADED_RENDERER))
         .Threaded = false,
 #else
         .Threaded = true,
@@ -752,7 +832,7 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
     };
     console->GetRenderer().SetOutputEnabled(OutputEnabledFor(slot.context.id));
     console->GetRenderer().SetRenderSettings(rendererSettings);
-    console->SPU.SetOutputEnabled(slot.context.id == State.visiblePlayer);
+    console->SPU.SetOutputEnabled(AudioOutputEnabledFor(slot.context.id));
     console->Start();
     return console;
 }
@@ -1042,14 +1122,16 @@ REBIT_EXPORT void md_set_visible_player(int player)
         if (rebit::RollbackFaulted || !rebit::RuntimeAtCheckpointBoundary())
         { rebit::State.error = "NDS rollback view change requires a healthy frame boundary."; return; }
         std::lock_guard<std::mutex> guard(rebit::State.frameMutex);
+#ifndef REBIT_MELONDS_DETERMINISTIC
         if (rebit::State.visiblePlayer != player)
             for (auto& record : rebit::RollbackRing) record.frame = UINT32_MAX;
+#endif
 #endif
         rebit::State.visiblePlayer = player;
         for (const auto& slot : rebit::State.slots)
         {
             slot->console->GetRenderer().SetOutputEnabled(rebit::OutputEnabledFor(slot->context.id));
-            slot->console->SPU.SetOutputEnabled(slot->context.id == player);
+            slot->console->SPU.SetOutputEnabled(rebit::AudioOutputEnabledFor(slot->context.id));
         }
     }
 }
@@ -1147,6 +1229,21 @@ REBIT_EXPORT int md_run_frame()
         return 0;
     }
 #endif
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    // Drain every SPU once, at the same emulated boundary on every replica.
+    // Playback consumes only frameAudio, never serialized guest state.
+    for (auto& slot : State.slots)
+    {
+        slot->frameAudioRead = 0;
+        slot->frameAudioCount = slot->console->SPU.ReadOutput(slot->frameAudio.data(), AudioScratchFrames);
+        if (slot->console->SPU.GetOutputSize() != 0)
+        {
+            RollbackFaulted = true;
+            State.error = "Determinism reference audio frame exceeded its bounded presentation buffer.";
+            return 0;
+        }
+    }
+#endif
     return 1;
 }
 
@@ -1169,7 +1266,7 @@ REBIT_EXPORT std::uint32_t md_rollback_configure(std::uint32_t capacity)
         {
             melonDS::Savestate state(12 * 1024 * 1024);
             state.Rollback = true;
-            if (index == State.slots.size()) State.multiplayer->DoRollbackState(&state);
+            if (index == State.slots.size()) DoMultiplayerRollbackState(&state);
             else if (!State.slots[index]->console->DoSavestate(&state)) state.Error = true;
             if (state.Error) { State.error = "Could not measure NDS rollback state."; return 0; }
             lengths[index] = state.Length();
@@ -1208,7 +1305,7 @@ REBIT_EXPORT int md_rollback_save_slot(std::uint32_t index, std::uint32_t frame)
         auto& bytes = record.parts[player];
         melonDS::Savestate state(bytes.data(), bytes.size(), true);
         state.Rollback = true;
-        if (player == State.slots.size()) State.multiplayer->DoRollbackState(&state);
+        if (player == State.slots.size()) DoMultiplayerRollbackState(&state);
         else
         {
             auto& slot = *State.slots[player];
@@ -1239,7 +1336,7 @@ REBIT_EXPORT int md_rollback_load_slot(std::uint32_t index, std::uint32_t frame)
         const auto& bytes = record.parts[player];
         melonDS::Savestate state(const_cast<std::uint8_t*>(bytes.data()), bytes.size(), false);
         state.Rollback = true;
-        if (player == State.slots.size()) State.multiplayer->DoRollbackState(&state);
+        if (player == State.slots.size()) DoMultiplayerRollbackState(&state);
         else
         {
             auto& slot = *State.slots[player];
@@ -1259,6 +1356,9 @@ REBIT_EXPORT int md_rollback_load_slot(std::uint32_t index, std::uint32_t frame)
         }
     }
     State.multiplayerReplySequence.store(record.replySequence, std::memory_order_release);
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    ClearPresentationAudio();
+#endif
     return 1;
 }
 
@@ -1297,16 +1397,36 @@ REBIT_EXPORT int md_audio_sample_rate() { return 48000; }
 REBIT_EXPORT int md_audio_available()
 {
     auto* slot = rebit::GetSlot(rebit::State.visiblePlayer);
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    return slot ? slot->frameAudioCount - slot->frameAudioRead : 0;
+#else
     return slot && slot->console ? slot->console->SPU.GetOutputSize() : 0;
+#endif
 }
+
+#ifdef REBIT_MELONDS_DETERMINISTIC
+REBIT_EXPORT int md_audio_read_player(int player, int maximumFrames)
+{
+    auto* slot = rebit::GetSlot(player);
+    if (!slot) return 0;
+    const int count = std::clamp(maximumFrames, 0, slot->frameAudioCount - slot->frameAudioRead);
+    std::copy_n(slot->frameAudio.data() + slot->frameAudioRead * 2, count * 2, rebit::State.audio.data());
+    slot->frameAudioRead += count;
+    return count;
+}
+#endif
 
 REBIT_EXPORT int md_audio_read(int maximumFrames)
 {
+#ifdef REBIT_MELONDS_DETERMINISTIC
+    return md_audio_read_player(rebit::State.visiblePlayer, maximumFrames);
+#else
     auto* slot = rebit::GetSlot(rebit::State.visiblePlayer);
     if (!slot || !slot->console)
         return 0;
     const int requested = std::clamp(maximumFrames, 0, rebit::AudioScratchFrames);
     return slot->console->SPU.ReadOutput(rebit::State.audio.data(), requested);
+#endif
 }
 
 REBIT_EXPORT const std::int16_t* md_audio_buffer()

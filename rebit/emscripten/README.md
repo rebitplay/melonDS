@@ -1,5 +1,9 @@
 # Rebit melonDS dual runtime
 
+For the isolated view-independent correctness profile and its strict replicated
+state tests, see [DETERMINISM.md](DETERMINISM.md). It is opt-in and is not a
+production determinism or performance guarantee.
+
 This is an isolated standalone melonDS frontend for Rebit's browser-native
 Nintendo DS Local Wireless mode. It does not use RetroArch or melonDS DS.
 
@@ -61,12 +65,23 @@ cmake --build build/wasm --parallel
 Artifacts are written to `build/wasm/dist/melonds_dual.{js,wasm}`. Emscripten
 embeds the pthread bootstrap in the modularized JavaScript wrapper.
 
-The WebAssembly interpreter uses a generated direct dispatcher. Regenerate it
-after changing `src/ARM_InstrTable.h`, or verify it before a release build:
+The WebAssembly interpreter uses a generated compact direct dispatcher, ported
+from melonDS rebit `f0fd0ae`. Opcode indices select a small `u16` handler ID,
+then a dense switch calls the instruction function directly. The existing
+direct ARM9/ARM7 memory, cycle and branch helpers are retained. This is an
+interpreter optimization, not a JIT or a renderer change.
+
+Regenerate it after changing `src/ARM_InstrTable.h`, or verify it before a
+release build. The tests check all 4096 ARM and 1024 Thumb mappings:
 
 ```bash
 python3 rebit/emscripten/generate_arm_dispatch.py --check
+node --test rebit/emscripten/tests/arm-dispatch.test.cjs
 ```
+
+See [CPU_DISPATCH.md](CPU_DISPATCH.md) for the isolated build and A/B checks.
+The full remelonds optimization inventory and WASM ARM7 fetch option are in
+[RESEARCH_OPTIMIZATIONS.md](RESEARCH_OPTIMIZATIONS.md).
 
 ## Experimental rollback scheduler check
 

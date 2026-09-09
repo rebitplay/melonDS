@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Generate the direct WebAssembly ARM interpreter dispatcher."""
+"""Generate compact direct WASM dispatch (melonDS rebit f0fd0ae).
+
+Keep this checkout's opcode semantics; only the dispatch representation changes.
+"""
 
 from __future__ import annotations
 
 import argparse
 import re
-from collections import OrderedDict
 from pathlib import Path
 
 
@@ -31,19 +33,23 @@ def parse_table(source: str, name: str, count: int) -> list[str]:
 
 
 def render_dispatch(name: str, entries: list[str]) -> str:
-    groups: OrderedDict[str, list[int]] = OrderedDict()
-    for index, function in enumerate(entries):
-        groups.setdefault(function, []).append(index)
+    handlers = list(dict.fromkeys(entries))
+    handler_ids = {function: index for index, function in enumerate(handlers)}
+    if len(handlers) > 65536:
+        raise RuntimeError("Handler IDs do not fit in u16")
 
     lines = [
         f"void {name}(ARM* cpu, u32 code)",
         "{",
-        "    switch (code)",
-        "    {",
+        "    static constexpr u16 handlers[] = {",
     ]
-    for function, indices in groups.items():
-        lines.extend(f"    case {index}:" for index in indices)
-        lines.append(f"        return {function}(cpu);")
+    for start in range(0, len(entries), 16):
+        lines.append("        " + ", ".join(
+            str(handler_ids[function]) for function in entries[start:start + 16]
+        ) + ",")
+    lines.extend(["    };", "    switch (handlers[code])", "    {"])
+    for index, function in enumerate(handlers):
+        lines.append(f"    case {index}: return {function}(cpu);")
     lines.extend(
         [
             "    default:",

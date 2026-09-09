@@ -515,6 +515,12 @@ private:
     bool Enabled;
 
     bool FrameIdentical;
+#ifdef REBIT_MELONDS_REUSE_RASTER
+    // Derived cache decision only; restore always forces fresh rasterization.
+    // FrameIdentical retains the conservative reference's serialized value.
+    bool ReuseRaster = false;
+    bool RasterValid = false;
+#endif
 
     u32 ScrolledLine[256];
 
