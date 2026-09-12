@@ -425,13 +425,103 @@ int LocalMP::RecvHostPacket(int inst, u8* packet, u64* timestamp)
     return RecvPacketGeneric(inst, packet, true, timestamp);
 }
 
+void LocalMP::SetExternalConnected(int inst, bool connected, bool waitForReplies)
+{
+    if (inst < 0 || inst >= 16)
+        return;
+
+    // The web Download Play profile has one local console, so reserve the
+    // adjacent instance ID for its remote DS. This keeps melonDS's existing
+    // AID/host bookkeeping intact while the packet bytes travel over WebRTC.
+    const int remote = inst == 0 ? 1 : 0;
+    QueueLock(MPQueueLock);
+    ExternalConnected[inst] = connected;
+    ExternalWaitReplies[inst] = connected && waitForReplies;
+    ExternalWaitPackets[inst] = false;
+    if (connected)
+    {
+        MPStatus.ConnectedBitmask |= static_cast<u16>(1 << remote);
+    }
+    else
+    {
+        MPStatus.ConnectedBitmask &= static_cast<u16>(~(1 << remote));
+        ExternalWaitReplies[inst] = false;
+        ExternalWaitPackets[inst] = false;
+        if (LastHostID == remote)
+        {
+            LastHostID = -1;
+            MPStatus.MPHostinst = 0;
+        }
+    }
+    QueueUnlock(MPQueueLock);
+}
+
+bool LocalMP::InjectExternalPacket(int inst, u32 type, u16 aid, const u8* packet, int len, u64 timestamp)
+{
+    if (inst < 0 || inst >= 16 || len < 0 || len > static_cast<int>(kMaxFrameSize))
+        return false;
+    if (len > 0 && !packet)
+        return false;
+
+    const int remote = inst == 0 ? 1 : 0;
+    type &= 0xFFFF;
+    // A zero-length MP reply with AID 0 is the DS default/blank reply used
+    // to complete a command timing window. Payload replies still require a
+    // real client AID so RecvReplies cannot index before its packet buffer.
+    if (type == 2 && (aid > 16 || (aid == 0 && len > 0)))
+        return false;
+
+    QueueLock(MPQueueLock);
+    ExternalConnected[inst] = true;
+    MPStatus.ConnectedBitmask |= static_cast<u16>(1 << remote);
+    if (type == 1)
+        ExternalWaitPackets[inst] = true;
+
+    MPPacketHeader pktheader;
+    pktheader.Magic = 0x4946494E;
+    pktheader.SenderID = remote;
+    pktheader.Type = type | (static_cast<u32>(aid) << 16);
+    pktheader.Length = len;
+    pktheader.Timestamp = timestamp;
+
+    if (type == 2)
+    {
+        FIFOWrite(inst, 1, &pktheader, sizeof(pktheader));
+        if (len)
+            FIFOWrite(inst, 1, const_cast<u8*>(packet), len);
+        ++ReplySignalCount[inst];
+    }
+    else
+    {
+        FIFOWrite(inst, 0, &pktheader, sizeof(pktheader));
+        if (len)
+            FIFOWrite(inst, 0, const_cast<u8*>(packet), len);
+        if (type == 1)
+        {
+            LastHostID = remote;
+            MPStatus.MPHostinst = remote;
+        }
+        ++PacketSignalCount[inst];
+    }
+    QueueUnlock(MPQueueLock);
+
+    if (type == 2)
+        PostSignal(SemPool[16 + inst]);
+    else
+        PostSignal(SemPool[inst]);
+    return true;
+}
+
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
 bool LocalMP::PacketsReady(int inst) noexcept
 {
     if (inst < 0 || inst >= 16)
         return false;
     QueueLock(MPQueueLock);
-    const bool ready = PacketSignalCount[inst] > 0;
+    // The firmware continuously polls its host queue while it is idle. Once
+    // the first Download Play command arrives, however, its transfer state
+    // must wait for the next host packet instead of racing the host's clock.
+    const bool ready = !ExternalWaitPackets[inst] || PacketSignalCount[inst] > 0;
     QueueUnlock(MPQueueLock);
     return ready;
 }
@@ -443,7 +533,11 @@ bool LocalMP::RepliesReady(int inst) noexcept
     QueueLock(MPQueueLock);
     const u16 connected = MPStatus.ConnectedBitmask;
     const u16 others = connected & ~(1 << inst);
-    const bool ready = others == 0 || ReplySignalCount[inst] > 0;
+    // For an external peer, an empty reply queue is a real asynchronous wait.
+    // The cooperative wrapper yields the in-progress frame back to JavaScript
+    // until WebRTC injects the reply.  Returning true here would make melonDS
+    // treat the missing reply as a timeout and stall Download Play transfers.
+    const bool ready = !ExternalWaitReplies[inst] || others == 0 || ReplySignalCount[inst] > 0;
     QueueUnlock(MPQueueLock);
     return ready;
 }
@@ -487,8 +581,15 @@ u16 LocalMP::RecvReplies(int inst, u8* packets, u64 timestamp, u16 aidmask)
             return 0;
         }
 
-        if ((pktheader.SenderID == inst) || // packet we sent out (shouldn't happen, but hey)
-            (pktheader.Timestamp < (timestamp - 32))) // stale packet
+        // Download Play peers have independent emulated clocks (the host
+        // boots a cartridge while the guest boots firmware). Their reply
+        // timestamps therefore cannot be compared against this console's
+        // USTimestamp; doing so makes every reply look stale and leaves the
+        // guest's software transfer retrying forever. Local in-process
+        // replicas still use the original stale-reply check.
+        const bool externalReply = ExternalConnected[inst] && pktheader.SenderID != inst;
+        if ((pktheader.SenderID == inst) // packet we sent out (shouldn't happen, but hey)
+            || (!externalReply && pktheader.Timestamp < (timestamp - 32))) // stale packet
         {
             // skip this packet
             ReplyReadOffset[inst] += pktheader.Length;

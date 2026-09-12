@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -65,6 +66,8 @@ constexpr std::uint32_t CheckpointVersion = 2;
 constexpr std::uint32_t MaximumConsoleStateBytes = 64 * 1024 * 1024;
 constexpr std::uint32_t MaximumMultiplayerStateBytes = 1024 * 1024;
 constexpr std::uint32_t MaximumCheckpointBytes = MaximumPlayers * MaximumConsoleStateBytes + MaximumMultiplayerStateBytes;
+constexpr std::uint32_t ExternalPacketMagic = 0x31504D58; // "XMP1" in little endian.
+constexpr std::uint32_t ExternalPacketHeaderBytes = 20;
 
 struct InputState
 {
@@ -97,6 +100,16 @@ struct Slot
     int multiplayerHostReceivePolls = 0;
 };
 
+struct FirmwareAssets
+{
+    const std::uint8_t* bios7 = nullptr;
+    std::uint32_t bios7Length = 0;
+    const std::uint8_t* bios9 = nullptr;
+    std::uint32_t bios9Length = 0;
+    const std::uint8_t* firmware = nullptr;
+    std::uint32_t firmwareLength = 0;
+};
+
 struct Runtime
 {
     std::mutex frameMutex;
@@ -105,7 +118,9 @@ struct Runtime
     std::vector<std::unique_ptr<Slot>> slots;
     std::unique_ptr<melonDS::LocalMP> multiplayer;
     std::array<std::int16_t, AudioScratchFrames * 2> audio {};
+    std::mutex externalPacketMutex;
     std::vector<std::uint8_t> checkpoint;
+    std::vector<std::uint8_t> externalPackets;
     std::string error;
     std::uint64_t generation = 0;
     int completed = 0;
@@ -122,8 +137,17 @@ struct Runtime
     std::atomic<std::uint32_t> schedulerJitterProfile {0};
     bool loaded = false;
     double lastFrameMs = 0.0;
+    int bootProfile = REBIT_MELONDS_DUAL_BOOT_REPLICATED;
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     std::uint64_t cooperativeSlices = 0;
+    // A single-console Download Play runtime can reach a LocalMP receive
+    // boundary before the browser has delivered the remote radio frame. Keep
+    // the emulated frame active and let md_run_frame() return a resumable
+    // network-wait status instead of treating that as a core failure.
+    bool cooperativeFrameActive = false;
+    bool cooperativeNetworkWait = false;
+    std::uint32_t cooperativeNetworkWaits = 0;
+    std::uint32_t cooperativeNetworkWaitReason = 0;
 #endif
 };
 
@@ -656,23 +680,29 @@ void CopyFramebuffer(Slot& slot)
 bool RunCooperativeFrame()
 {
     State.cooperativeSlices = 0;
-    for (auto& slot : State.slots)
+    State.cooperativeNetworkWait = false;
+    if (!State.cooperativeFrameActive)
     {
-        slot->cooperativeFrameComplete = false;
-        const InputState input = slot->input;
-        slot->console->SetKeyMask(input.keys);
-        if (input.touching)
-            slot->console->TouchScreen(input.touchX, input.touchY);
-        else
-            slot->console->ReleaseScreen();
-        if (!slot->console->BeginCooperativeFrame())
+        for (auto& slot : State.slots)
         {
-            State.error = "NDS Local Wireless cooperative console was already advancing a frame.";
-            return false;
+            slot->cooperativeFrameComplete = false;
+            const InputState input = slot->input;
+            slot->console->SetKeyMask(input.keys);
+            if (input.touching)
+                slot->console->TouchScreen(input.touchX, input.touchY);
+            else
+                slot->console->ReleaseScreen();
+            if (!slot->console->BeginCooperativeFrame())
+            {
+                State.error = "NDS Local Wireless cooperative console was already advancing a frame.";
+                return false;
+            }
         }
+
+        BeginMultiplayerFrame();
+        State.cooperativeFrameActive = true;
     }
 
-    BeginMultiplayerFrame();
     constexpr std::uint64_t MaximumCooperativeSlicesPerFrame = 2'000'000;
     std::size_t nextSlot = State.slots.size() > 1 ? 1 : 0;
     while (true)
@@ -690,6 +720,13 @@ bool RunCooperativeFrame()
             ++State.cooperativeSlices;
             if (slot->cooperativeFrameComplete)
                 CompleteMultiplayerFrame(slot->context.id);
+            else if (State.cooperativeNetworkWait)
+            {
+                // Keep the NDS frame and multiplayer turn alive.  The JS
+                // worker will return to its event loop, deliver WebRTC radio
+                // data, then call md_run_frame() again to resume this slice.
+                return false;
+            }
             if (State.cooperativeSlices > MaximumCooperativeSlicesPerFrame)
             {
                 State.error = "NDS Local Wireless cooperative scheduler exceeded its synchronized frame budget.";
@@ -699,7 +736,10 @@ bool RunCooperativeFrame()
             break;
         }
         if (allComplete)
+        {
+            State.cooperativeFrameActive = false;
             return true;
+        }
     }
 }
 #else
@@ -767,6 +807,10 @@ void StopRuntime()
     State.slots.clear();
     State.multiplayer.reset();
     State.checkpoint.clear();
+    {
+        std::lock_guard<std::mutex> guard(State.externalPacketMutex);
+        State.externalPackets.clear();
+    }
     State.visiblePlayer = 0;
 #ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
     State.renderAll = false;
@@ -779,14 +823,65 @@ void StopRuntime()
     State.schedulerJitterProfile.store(0, std::memory_order_relaxed);
     State.loaded = false;
     State.lastFrameMs = 0.0;
+    State.bootProfile = REBIT_MELONDS_DUAL_BOOT_REPLICATED;
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     State.cooperativeSlices = 0;
+    State.cooperativeFrameActive = false;
+    State.cooperativeNetworkWait = false;
+    State.cooperativeNetworkWaits = 0;
+    State.cooperativeNetworkWaitReason = 0;
 #endif
 }
 
-std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32_t romLength, Slot& slot, std::uint64_t seed)
+std::unique_ptr<melonDS::ARM7BIOSImage> MakeARM7BIOS(const FirmwareAssets& assets)
 {
-    melonDS::Firmware firmware(0);
+    auto image = std::make_unique<melonDS::ARM7BIOSImage>(melonDS::FreeBIOSGetNtrArm7());
+    if (assets.bios7 && assets.bios7Length)
+    {
+        if (assets.bios7Length != image->size())
+            return nullptr;
+        std::memcpy(image->data(), assets.bios7, image->size());
+    }
+    return image;
+}
+
+std::unique_ptr<melonDS::ARM9BIOSImage> MakeARM9BIOS(const FirmwareAssets& assets)
+{
+    auto image = std::make_unique<melonDS::ARM9BIOSImage>(melonDS::FreeBIOSGetNtrArm9());
+    if (assets.bios9 && assets.bios9Length)
+    {
+        if (assets.bios9Length != image->size())
+            return nullptr;
+        std::memcpy(image->data(), assets.bios9, image->size());
+    }
+    return image;
+}
+
+std::unique_ptr<melonDS::NDS> CreateConsole(
+    const std::uint8_t* rom,
+    std::uint32_t romLength,
+    Slot& slot,
+    std::uint64_t seed,
+    int bootProfile,
+    const FirmwareAssets& assets)
+{
+    if (bootProfile != REBIT_MELONDS_DUAL_BOOT_REPLICATED
+        && bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST
+        && bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT)
+        return nullptr;
+
+    const bool needsRom = bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT;
+    if (needsRom && (!rom || romLength < 4096))
+        return nullptr;
+    if (!needsRom && (!assets.bios7 || !assets.bios9 || !assets.firmware
+        || assets.bios7Length != melonDS::ARM7BIOSSize
+        || assets.bios9Length != melonDS::ARM9BIOSSize
+        || assets.firmwareLength == 0))
+        return nullptr;
+
+    melonDS::Firmware firmware = assets.firmware && assets.firmwareLength
+        ? melonDS::Firmware(assets.firmware, assets.firmwareLength)
+        : melonDS::Firmware(0);
     auto& header = firmware.GetHeader();
     header.MacAddr = {
         0x02,
@@ -800,6 +895,12 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
     firmware.UpdateChecksums();
 
     melonDS::NDSArgs arguments;
+    auto arm7Bios = MakeARM7BIOS(assets);
+    auto arm9Bios = MakeARM9BIOS(assets);
+    if (!arm7Bios || !arm9Bios)
+        return nullptr;
+    arguments.ARM7BIOS = std::move(arm7Bios);
+    arguments.ARM9BIOS = std::move(arm9Bios);
     arguments.Firmware = std::move(firmware);
 #ifdef REBIT_MELONDS_DUAL_NATIVE_JIT
     arguments.JIT = melonDS::JITArgs();
@@ -811,14 +912,18 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
     arguments.OutputSampleRate = 48000.0;
 
     auto console = std::make_unique<melonDS::NDS>(std::move(arguments), &slot.context);
-    auto cart = melonDS::NDSCart::ParseROM(rom, romLength, &slot.context);
-    if (!cart)
-        return nullptr;
-
-    console->SetNDSCart(std::move(cart));
+    if (needsRom)
+    {
+        auto cart = melonDS::NDSCart::ParseROM(rom, romLength, &slot.context);
+        if (!cart)
+            return nullptr;
+        console->SetNDSCart(std::move(cart));
+    }
     console->Reset();
     console->RTC.SetDateTime(2000, 1, 1, 0, 0, 0);
-    console->SetupDirectBoot("rebit.nds");
+    if (needsRom)
+        console->SetupDirectBoot("rebit.nds");
+    console->Start();
 
     melonDS::RendererSettings rendererSettings {
         .ScaleFactor = 1,
@@ -865,12 +970,30 @@ melonDS::LocalMP* LocalMultiplayer() noexcept
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
 bool MultiplayerPacketsReady(void* userdata) noexcept
 {
-    return State.multiplayer && State.multiplayer->PacketsReady(InstanceId(userdata));
+    const bool ready = State.multiplayer && State.multiplayer->PacketsReady(InstanceId(userdata));
+    if (!ready && State.bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT
+        && State.cooperativeFrameActive)
+    {
+        State.cooperativeNetworkWait = true;
+        ++State.cooperativeNetworkWaits;
+        State.cooperativeNetworkWaitReason = 1;
+    }
+    return ready;
 }
 
 bool MultiplayerRepliesReady(void* userdata) noexcept
 {
-    return State.multiplayer && State.multiplayer->RepliesReady(InstanceId(userdata));
+    const bool ready = State.multiplayer && State.multiplayer->RepliesReady(InstanceId(userdata));
+    if (!ready && State.bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST
+        && State.cooperativeFrameActive)
+    {
+        State.cooperativeNetworkWait = true;
+        ++State.cooperativeNetworkWaits;
+        State.cooperativeNetworkWaitReason = 2;
+    }
+    if (!ready && State.bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT)
+        State.cooperativeNetworkWaitReason = 1;
+    return ready;
 }
 
 void RequestMultiplayerYield(void* userdata) noexcept
@@ -1012,6 +1135,39 @@ void NoteMultiplayerReply() noexcept
     NotifyMultiplayerProgress();
 }
 
+void QueueExternalMultiplayerPacket(
+    int instance,
+    std::uint8_t type,
+    std::uint16_t aid,
+    const std::uint8_t* data,
+    std::uint32_t length,
+    std::uint64_t timestamp) noexcept
+{
+    if ((State.bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST
+            && State.bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT)
+        || instance < 0
+        || instance >= static_cast<int>(State.slots.size())
+        || length > melonDS::kMaxFrameSize
+        || (length && !data))
+        return;
+
+    std::lock_guard<std::mutex> guard(State.externalPacketMutex);
+    // Keep an individual browser message bounded. The LocalMP frame limit is
+    // deliberately small enough that a malicious peer cannot make the WASM
+    // heap grow merely by sending radio data.
+    if (State.externalPackets.size() > 4 * 1024 * 1024)
+        return;
+    Append32(State.externalPackets, ExternalPacketMagic);
+    State.externalPackets.push_back(type);
+    State.externalPackets.push_back(0);
+    State.externalPackets.push_back(static_cast<std::uint8_t>(aid));
+    State.externalPackets.push_back(static_cast<std::uint8_t>(aid >> 8));
+    Append64(State.externalPackets, timestamp);
+    Append32(State.externalPackets, length);
+    if (length)
+        State.externalPackets.insert(State.externalPackets.end(), data, data + length);
+}
+
 void SignalStopped(void* userdata) noexcept
 {
     if (auto* context = Context(userdata))
@@ -1041,25 +1197,62 @@ REBIT_EXPORT const char* md_runtime_abi()
     return REBIT_MELONDS_DUAL_RUNTIME_ABI;
 }
 
-REBIT_EXPORT int md_load(const std::uint8_t* rom, std::uint32_t romLength, int players, std::uint32_t seedLow, std::uint32_t seedHigh)
+REBIT_EXPORT int md_load_with_profile(
+    const std::uint8_t* rom,
+    std::uint32_t romLength,
+    int players,
+    std::uint32_t seedLow,
+    std::uint32_t seedHigh,
+    int bootProfile,
+    const std::uint8_t* bios7,
+    std::uint32_t bios7Length,
+    const std::uint8_t* bios9,
+    std::uint32_t bios9Length,
+    const std::uint8_t* firmware,
+    std::uint32_t firmwareLength)
 {
     using namespace rebit;
     StopRuntime();
     State.error.clear();
 
-    if (!rom || romLength < 4096)
+    const bool downloadClient = bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT;
+    const bool downloadHost = bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST;
+    if (bootProfile != REBIT_MELONDS_DUAL_BOOT_REPLICATED && !downloadHost && !downloadClient)
+    {
+        State.error = "Unknown Nintendo DS boot profile.";
+        return 0;
+    }
+    if (!downloadClient && (!rom || romLength < 4096))
     {
         State.error = "Nintendo DS ROM data is missing or too small.";
         return 0;
     }
-    if (players < MinimumPlayers || players > MaximumPlayers)
+    if ((bootProfile == REBIT_MELONDS_DUAL_BOOT_REPLICATED && (players < MinimumPlayers || players > MaximumPlayers))
+        || (bootProfile != REBIT_MELONDS_DUAL_BOOT_REPLICATED && (players < 1 || players > MaximumPlayers)))
     {
-        State.error = "NDS Local Wireless requires between two and four players.";
+        State.error = bootProfile == REBIT_MELONDS_DUAL_BOOT_REPLICATED
+            ? "NDS Local Wireless requires between two and four players."
+            : "NDS Download Play requires between one and four emulated consoles.";
+        return 0;
+    }
+    if (downloadClient && (!bios7 || bios7Length != melonDS::ARM7BIOSSize
+        || !bios9 || bios9Length != melonDS::ARM9BIOSSize
+        || !firmware || firmwareLength == 0))
+    {
+        State.error = "NDS Download Play client requires ARM7 BIOS, ARM9 BIOS, and firmware.";
         return 0;
     }
 
     try
     {
+        const FirmwareAssets assets {
+            .bios7 = bios7,
+            .bios7Length = bios7Length,
+            .bios9 = bios9,
+            .bios9Length = bios9Length,
+            .firmware = firmware,
+            .firmwareLength = firmwareLength,
+        };
         State.multiplayer = std::make_unique<melonDS::LocalMP>();
         State.multiplayer->SetRecvTimeout(LocalMultiplayerReceiveTimeoutMs);
         const std::uint64_t seed = static_cast<std::uint64_t>(seedLow) | (static_cast<std::uint64_t>(seedHigh) << 32);
@@ -1068,10 +1261,18 @@ REBIT_EXPORT int md_load(const std::uint8_t* rom, std::uint32_t romLength, int p
         {
             auto slot = std::make_unique<Slot>();
             slot->context.id = player;
-            slot->console = CreateConsole(rom, romLength, *slot, seed);
+            slot->console = CreateConsole(
+                rom,
+                romLength,
+                *slot,
+                seed,
+                bootProfile,
+                assets);
             if (!slot->console)
             {
-                State.error = "Standalone melonDS rejected the Nintendo DS ROM.";
+                State.error = downloadClient
+                    ? "Standalone melonDS could not boot the supplied Nintendo DS firmware."
+                    : "Standalone melonDS rejected the Nintendo DS ROM.";
                 StopRuntime();
                 return 0;
             }
@@ -1083,6 +1284,7 @@ REBIT_EXPORT int md_load(const std::uint8_t* rom, std::uint32_t romLength, int p
             slot->worker = std::thread(WorkerLoop, slot.get());
 #endif
 
+        State.bootProfile = bootProfile;
         State.loaded = true;
         return 1;
     }
@@ -1097,6 +1299,33 @@ REBIT_EXPORT int md_load(const std::uint8_t* rom, std::uint32_t romLength, int p
 
     StopRuntime();
     return 0;
+}
+
+REBIT_EXPORT int md_load(
+    const std::uint8_t* rom,
+    std::uint32_t romLength,
+    int players,
+    std::uint32_t seedLow,
+    std::uint32_t seedHigh)
+{
+    return md_load_with_profile(
+        rom,
+        romLength,
+        players,
+        seedLow,
+        seedHigh,
+        REBIT_MELONDS_DUAL_BOOT_REPLICATED,
+        nullptr,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        0);
+}
+
+REBIT_EXPORT int md_boot_profile()
+{
+    return rebit::State.bootProfile;
 }
 
 REBIT_EXPORT void md_destroy()
@@ -1189,7 +1418,17 @@ REBIT_EXPORT int md_run_frame()
     const auto started = std::chrono::steady_clock::now();
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     if (!RunCooperativeFrame())
+    {
+        if (State.cooperativeNetworkWait)
+        {
+            // 2 means “the current frame is waiting for an external radio
+            // packet”; it is not an emulation failure and must be resumed
+            // after the worker event loop has had a chance to inject data.
+            State.cooperativeNetworkWait = false;
+            return 2;
+        }
         return 0;
+    }
 #else
     BeginMultiplayerFrame();
     {
@@ -1543,6 +1782,93 @@ REBIT_EXPORT std::uint32_t md_mp_replies(int player)
 {
     auto* slot = rebit::GetSlot(player);
     return slot ? static_cast<std::uint32_t>(slot->context.replies) : 0;
+}
+
+REBIT_EXPORT std::uint32_t md_mp_network_waits()
+{
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    return rebit::State.cooperativeNetworkWaits;
+#else
+    return 0;
+#endif
+}
+
+REBIT_EXPORT std::uint32_t md_mp_network_wait_reason()
+{
+#ifdef REBIT_MELONDS_DUAL_COOPERATIVE
+    return rebit::State.cooperativeNetworkWaitReason;
+#else
+    return 0;
+#endif
+}
+
+REBIT_EXPORT std::uint32_t md_mp_outgoing_size()
+{
+    std::lock_guard<std::mutex> guard(rebit::State.externalPacketMutex);
+    return static_cast<std::uint32_t>(rebit::State.externalPackets.size());
+}
+
+REBIT_EXPORT const std::uint8_t* md_mp_outgoing_data()
+{
+    std::lock_guard<std::mutex> guard(rebit::State.externalPacketMutex);
+    return rebit::State.externalPackets.empty() ? nullptr : rebit::State.externalPackets.data();
+}
+
+REBIT_EXPORT void md_mp_outgoing_clear()
+{
+    std::lock_guard<std::mutex> guard(rebit::State.externalPacketMutex);
+    rebit::State.externalPackets.clear();
+}
+
+REBIT_EXPORT void md_mp_set_external_connected(int connected)
+{
+    if (!rebit::State.multiplayer
+        || (rebit::State.bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST
+            && rebit::State.bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT))
+        return;
+    rebit::State.multiplayer->SetExternalConnected(
+        0,
+        connected != 0,
+        rebit::State.bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST);
+}
+
+REBIT_EXPORT int md_mp_inject(const std::uint8_t* data, std::uint32_t length)
+{
+    if (!data || length == 0
+        || !rebit::State.multiplayer
+        || (rebit::State.bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST
+            && rebit::State.bootProfile != REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT))
+        return 0;
+
+    const std::uint8_t* cursor = data;
+    const std::uint8_t* end = data + length;
+    int accepted = 0;
+    while (cursor < end)
+    {
+        std::uint32_t magic = 0;
+        if (!rebit::Read32(cursor, end, magic) || magic != rebit::ExternalPacketMagic
+            || end - cursor < static_cast<std::ptrdiff_t>(rebit::ExternalPacketHeaderBytes - 4))
+            return accepted;
+        const std::uint8_t type = *cursor++;
+        ++cursor; // reserved
+        const std::uint16_t aid = static_cast<std::uint16_t>(cursor[0])
+            | (static_cast<std::uint16_t>(cursor[1]) << 8);
+        cursor += 2;
+        std::uint64_t timestamp = 0;
+        std::uint32_t payloadLength = 0;
+        if (!rebit::Read64(cursor, end, timestamp) || !rebit::Read32(cursor, end, payloadLength)
+            || payloadLength > melonDS::kMaxFrameSize
+            || payloadLength > static_cast<std::uint32_t>(end - cursor))
+            return accepted;
+        if (type > 3 || (type == 2 && (aid > 16 || (aid == 0 && payloadLength > 0))))
+            return accepted;
+        if (!rebit::State.multiplayer->InjectExternalPacket(
+                0, type, aid, cursor, static_cast<int>(payloadLength), timestamp))
+            return accepted;
+        cursor += payloadLength;
+        ++accepted;
+    }
+    return accepted;
 }
 
 REBIT_EXPORT double md_last_frame_ms()

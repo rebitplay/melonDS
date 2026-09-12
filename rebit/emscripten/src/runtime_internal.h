@@ -53,6 +53,9 @@ void LeaveMultiplayerTurn(void* userdata, bool scheduled) noexcept;
 bool DeferMultiplayerReceivePoll(void* userdata, MultiplayerOperation operation) noexcept;
 void NoteMultiplayerCommand(void* userdata) noexcept;
 void NoteMultiplayerReply() noexcept;
+void QueueExternalMultiplayerPacket(int instance, std::uint8_t type, std::uint16_t aid,
+                                    const std::uint8_t* data, std::uint32_t length,
+                                    std::uint64_t timestamp) noexcept;
 void SignalStopped(void* userdata) noexcept;
 void StoreSave(const std::uint8_t* data, std::uint32_t length, void* userdata);
 

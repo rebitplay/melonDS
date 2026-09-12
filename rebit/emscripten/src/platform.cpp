@@ -379,7 +379,10 @@ int MP_SendPacket(u8* data, int length, u64 timestamp, void* userdata)
     if (auto* context = rebit::Context(userdata))
         ++context->packetsSent;
     auto* multiplayer = rebit::LocalMultiplayer();
-    return multiplayer ? multiplayer->SendPacket(rebit::InstanceId(userdata), data, length, timestamp) : 0;
+    const int sent = multiplayer ? multiplayer->SendPacket(rebit::InstanceId(userdata), data, length, timestamp) : 0;
+    if (sent > 0)
+        rebit::QueueExternalMultiplayerPacket(rebit::InstanceId(userdata), 0, 0, data, static_cast<std::uint32_t>(length), timestamp);
+    return sent;
 }
 
 int MP_RecvPacket(u8* data, u64* timestamp, void* userdata)
@@ -406,7 +409,10 @@ int MP_SendCmd(u8* data, int length, u64 timestamp, void* userdata)
     auto* multiplayer = rebit::LocalMultiplayer();
     const int sent = multiplayer ? multiplayer->SendCmd(rebit::InstanceId(userdata), data, length, timestamp) : 0;
     if (sent > 0)
+    {
         rebit::NoteMultiplayerCommand(userdata);
+        rebit::QueueExternalMultiplayerPacket(rebit::InstanceId(userdata), 1, 0, data, static_cast<std::uint32_t>(length), timestamp);
+    }
     return sent;
 }
 
@@ -425,7 +431,10 @@ int MP_SendReply(u8* data, int length, u64 timestamp, u16 aid, void* userdata)
     // transition. SendReply records the reply header even when there is no
     // payload, so always wake the deterministic scheduler after the call.
     if (multiplayer && (sent > 0 || length == 0))
+    {
         rebit::NoteMultiplayerReply();
+        rebit::QueueExternalMultiplayerPacket(rebit::InstanceId(userdata), 2, aid, data, static_cast<std::uint32_t>(length), timestamp);
+    }
     return sent;
 }
 
@@ -435,7 +444,10 @@ int MP_SendAck(u8* data, int length, u64 timestamp, void* userdata)
     if (auto* context = rebit::Context(userdata))
         ++context->packetsSent;
     auto* multiplayer = rebit::LocalMultiplayer();
-    return multiplayer ? multiplayer->SendAck(rebit::InstanceId(userdata), data, length, timestamp) : 0;
+    const int sent = multiplayer ? multiplayer->SendAck(rebit::InstanceId(userdata), data, length, timestamp) : 0;
+    if (sent > 0)
+        rebit::QueueExternalMultiplayerPacket(rebit::InstanceId(userdata), 3, 0, data, static_cast<std::uint32_t>(length), timestamp);
+    return sent;
 }
 
 int MP_RecvHostPacket(u8* data, u64* timestamp, void* userdata)

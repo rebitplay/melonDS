@@ -64,6 +64,11 @@ public:
     int SendAck(int inst, u8* data, int len, u64 timestamp);
     int RecvHostPacket(int inst, u8* data, u64* timestamp);
     u16 RecvReplies(int inst, u8* data, u64 timestamp, u16 aidmask);
+    // Download Play uses one emulated console per process and bridges its
+    // LocalMP frames over the browser data channel. These methods inject the
+    // remote radio stream without changing the normal in-process queues.
+    void SetExternalConnected(int inst, bool connected, bool waitForReplies = true);
+    bool InjectExternalPacket(int inst, u32 type, u16 aid, const u8* packet, int len, u64 timestamp);
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     bool PacketsReady(int inst) noexcept;
     bool RepliesReady(int inst) noexcept;
@@ -89,6 +94,9 @@ private:
     u32 ReplyReadOffset[16] {};
     u32 PacketSignalCount[16] {};
     u32 ReplySignalCount[16] {};
+    bool ExternalConnected[16] {};
+    bool ExternalWaitReplies[16] {};
+    bool ExternalWaitPackets[16] {};
 
     int LastHostID = -1;
     Platform::Semaphore* SemPool[32] {};

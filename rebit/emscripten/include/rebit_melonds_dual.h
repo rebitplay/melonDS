@@ -15,12 +15,35 @@ enum
     REBIT_MELONDS_DUAL_AUDIO_SAMPLE_RATE = 48000,
 };
 
+/* Startup profiles used by the NDS netplay layer.  The legacy md_load()
+ * entrypoint remains the replicated-ROM Lockstep profile. */
+enum
+{
+    REBIT_MELONDS_DUAL_BOOT_REPLICATED = 0,
+    REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST = 1,
+    REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT = 2,
+};
+
 uint32_t md_api_version(void);
 const char* md_runtime_abi(void);
 const char* md_build_id(void);
 const char* md_last_error(void);
 
 int md_load(const uint8_t* rom, uint32_t rom_length, int players, uint32_t seed_low, uint32_t seed_high);
+int md_load_with_profile(
+    const uint8_t* rom,
+    uint32_t rom_length,
+    int players,
+    uint32_t seed_low,
+    uint32_t seed_high,
+    int boot_profile,
+    const uint8_t* bios7,
+    uint32_t bios7_length,
+    const uint8_t* bios9,
+    uint32_t bios9_length,
+    const uint8_t* firmware,
+    uint32_t firmware_length);
+int md_boot_profile(void);
 void md_destroy(void);
 int md_is_loaded(void);
 int md_player_count(void);
@@ -68,6 +91,16 @@ uint32_t md_mp_packets_sent(int player);
 uint32_t md_mp_packets_received(int player);
 uint32_t md_mp_commands(int player);
 uint32_t md_mp_replies(int player);
+uint32_t md_mp_network_waits(void);
+uint32_t md_mp_network_wait_reason(void);
+/* Download Play radio bridge. Records are XMP1-framed and may contain one or
+ * more LocalMP operations. The pointer remains valid until the next core call
+ * that advances or clears the outgoing queue. */
+uint32_t md_mp_outgoing_size(void);
+const uint8_t* md_mp_outgoing_data(void);
+void md_mp_outgoing_clear(void);
+void md_mp_set_external_connected(int connected);
+int md_mp_inject(const uint8_t* data, uint32_t length);
 double md_last_frame_ms(void);
 
 #ifdef REBIT_MELONDS_ROLLBACK

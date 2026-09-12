@@ -102,9 +102,10 @@ The default Lockstep and Android builds do not enable this profile.
 
 ## Historical cooperative WebAssembly build
 
-The cooperative profile is retained only for reproducibility of the rejected
-mobile experiment. It does not meet Rebit's 59 FPS release gate and must not be
-used for production rooms or new releases.
+The cooperative profile runs the replicated Local Wireless runtime without
+pthreads, shared memory, or OffscreenCanvas. It also supports the single-console
+host and firmware-client profiles used by Download Play over an external radio
+transport.
 
 ```bash
 source /path/to/emsdk/emsdk_env.sh
@@ -115,5 +116,5 @@ cmake --build build/wasm-cooperative --parallel
 ```
 
 The cooperative artifacts are emitted under the same build directory with the
-immutable build ID `melonds-dual-cooperative-1`; the publishing pipeline gives
+immutable build ID `melonds-dual-cooperative-2`; the publishing pipeline gives
 them distinct filenames from the threaded profile.
