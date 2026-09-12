@@ -533,11 +533,18 @@ bool LocalMP::RepliesReady(int inst) noexcept
     QueueLock(MPQueueLock);
     const u16 connected = MPStatus.ConnectedBitmask;
     const u16 others = connected & ~(1 << inst);
-    // For an external peer, an empty reply queue is a real asynchronous wait.
-    // The cooperative wrapper yields the in-progress frame back to JavaScript
-    // until WebRTC injects the reply.  Returning true here would make melonDS
-    // treat the missing reply as a timeout and stall Download Play transfers.
-    const bool ready = !ExternalWaitReplies[inst] || others == 0 || ReplySignalCount[inst] > 0;
+    // A command is completed only after every connected client has published
+    // its reply bit.  In the cooperative runtime the two consoles share one
+    // thread, so the host can otherwise reach this check before the guest has
+    // had a chance to process the command.  Returning true in that window
+    // makes Wifi::RunTX poll an empty reply FIFO and Mario Kart interprets the
+    // missing response as a failed local-wireless join.
+    //
+    // Download Play still uses the asynchronous reply queue below: its remote
+    // DS is in another browser and cannot be advanced by this scheduler.
+    const bool localRepliesReady = (MPStatus.MPReplyBitmask & others) == others;
+    const bool externalRepliesReady = !ExternalWaitReplies[inst] || others == 0 || ReplySignalCount[inst] > 0;
+    const bool ready = ExternalConnected[inst] ? externalRepliesReady : localRepliesReady;
     QueueUnlock(MPQueueLock);
     return ready;
 }
