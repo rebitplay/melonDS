@@ -22,6 +22,10 @@ enum
     REBIT_MELONDS_DUAL_BOOT_REPLICATED = 0,
     REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST = 1,
     REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT = 2,
+    /* Two-console deterministic Download Play replica: slot 0 directly boots
+     * the cartridge while slot 1 boots the supplied DS firmware without a
+     * cartridge. Their LocalMP radios remain in this process. */
+    REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_REPLICATED = 3,
 };
 
 uint32_t md_api_version(void);

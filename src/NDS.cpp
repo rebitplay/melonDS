@@ -442,6 +442,12 @@ void NDS::Reset()
 
     RunningGame = false;
     LastSysClockCycles = 0;
+    // Keep frame accounting part of the deterministic reset state. This is
+    // especially important for a mixed Download Play replica where slot 0
+    // direct-boots a cartridge and slot 1 starts in firmware.
+    NumFrames = 0;
+    NumLagFrames = 0;
+    LagFrameFlag = false;
 
     // BIOS files are now loaded by the frontend
 

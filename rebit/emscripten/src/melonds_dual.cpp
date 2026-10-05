@@ -155,6 +155,9 @@ Runtime State;
 
 bool OutputEnabledFor(int player)
 {
+#ifdef REBIT_MELONDS_DOWNLOAD_REPLICA
+    return player == State.visiblePlayer;
+#endif
 #ifdef REBIT_MELONDS_DETERMINISTIC
     return true;
 #endif
@@ -166,6 +169,9 @@ bool OutputEnabledFor(int player)
 
 bool AudioOutputEnabledFor(int player)
 {
+#ifdef REBIT_MELONDS_DOWNLOAD_REPLICA
+    return player == State.visiblePlayer;
+#endif
 #ifdef REBIT_MELONDS_DETERMINISTIC
     return true;
 #else
@@ -1217,7 +1223,8 @@ REBIT_EXPORT int md_load_with_profile(
 
     const bool downloadClient = bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT;
     const bool downloadHost = bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST;
-    if (bootProfile != REBIT_MELONDS_DUAL_BOOT_REPLICATED && !downloadHost && !downloadClient)
+    const bool replicatedDownload = bootProfile == REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_REPLICATED;
+    if (bootProfile != REBIT_MELONDS_DUAL_BOOT_REPLICATED && !downloadHost && !downloadClient && !replicatedDownload)
     {
         State.error = "Unknown Nintendo DS boot profile.";
         return 0;
@@ -1228,18 +1235,21 @@ REBIT_EXPORT int md_load_with_profile(
         return 0;
     }
     if ((bootProfile == REBIT_MELONDS_DUAL_BOOT_REPLICATED && (players < MinimumPlayers || players > MaximumPlayers))
-        || (bootProfile != REBIT_MELONDS_DUAL_BOOT_REPLICATED && (players < 1 || players > MaximumPlayers)))
+        || (replicatedDownload && players != 2)
+        || (!replicatedDownload && bootProfile != REBIT_MELONDS_DUAL_BOOT_REPLICATED
+            && (players < 1 || players > MaximumPlayers)))
     {
-        State.error = bootProfile == REBIT_MELONDS_DUAL_BOOT_REPLICATED
+        State.error = replicatedDownload ? "Replicated Download Play requires exactly two emulated consoles."
+            : bootProfile == REBIT_MELONDS_DUAL_BOOT_REPLICATED
             ? "NDS Local Wireless requires between two and four players."
             : "NDS Download Play requires between one and four emulated consoles.";
         return 0;
     }
-    if (downloadClient && (!bios7 || bios7Length != melonDS::ARM7BIOSSize
+    if ((downloadClient || replicatedDownload) && (!bios7 || bios7Length != melonDS::ARM7BIOSSize
         || !bios9 || bios9Length != melonDS::ARM9BIOSSize
         || !firmware || firmwareLength == 0))
     {
-        State.error = "NDS Download Play client requires ARM7 BIOS, ARM9 BIOS, and firmware.";
+        State.error = "NDS Download Play requires ARM7 BIOS, ARM9 BIOS, and firmware.";
         return 0;
     }
 
@@ -1261,12 +1271,17 @@ REBIT_EXPORT int md_load_with_profile(
         {
             auto slot = std::make_unique<Slot>();
             slot->context.id = player;
+            const int consoleBootProfile = replicatedDownload
+                ? (player == 0
+                    ? REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_HOST
+                    : REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT)
+                : bootProfile;
             slot->console = CreateConsole(
                 rom,
                 romLength,
                 *slot,
                 seed,
-                bootProfile,
+                consoleBootProfile,
                 assets);
             if (!slot->console)
             {

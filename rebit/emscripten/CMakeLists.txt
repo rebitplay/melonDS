@@ -3,6 +3,13 @@ cmake_minimum_required(VERSION 3.20)
 project(rebit_melonds_dual LANGUAGES C CXX)
 
 option(REBIT_MELONDS_DUAL_COOPERATIVE "Build the single-threaded cooperative WebAssembly runtime" OFF)
+option(REBIT_MELONDS_DOWNLOAD_REPLICA "Build the isolated cooperative Download Play determinism experiment" OFF)
+if(REBIT_MELONDS_DOWNLOAD_REPLICA)
+    set(REBIT_MELONDS_DUAL_COOPERATIVE ON CACHE BOOL "Cooperative runtime" FORCE)
+    set(REBIT_MELONDS_ROLLBACK ON CACHE BOOL "State comparison APIs" FORCE)
+    set(REBIT_MELONDS_DETERMINISTIC ON CACHE BOOL "View-independent simulation" FORCE)
+    add_compile_definitions(REBIT_MELONDS_DOWNLOAD_REPLICA=1)
+endif()
 option(REBIT_MELONDS_DUAL_BUILD_CLI "Build the native command-line benchmark" ON)
 option(REBIT_MELONDS_DUAL_NATIVE_JIT "Enable melonDS JIT execution in native builds" OFF)
 option(REBIT_MELONDS_ROLLBACK "Build the isolated experimental rollback runtime" OFF)
@@ -28,7 +35,7 @@ endif()
 if(REBIT_MELONDS_ROLLBACK_PLAYGROUND AND NOT REBIT_MELONDS_ROLLBACK)
     message(FATAL_ERROR "The playground requires the rollback runtime")
 endif()
-if(REBIT_MELONDS_ROLLBACK AND (REBIT_MELONDS_DUAL_COOPERATIVE OR REBIT_MELONDS_DUAL_NATIVE_JIT))
+if(REBIT_MELONDS_ROLLBACK AND ((REBIT_MELONDS_DUAL_COOPERATIVE AND NOT REBIT_MELONDS_DOWNLOAD_REPLICA) OR REBIT_MELONDS_DUAL_NATIVE_JIT))
     message(FATAL_ERROR "Rollback currently requires the parallel interpreter runtime")
 endif()
 
@@ -112,9 +119,16 @@ endif()
 set_property(TARGET ${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PROPERTY CXX_STANDARD 20)
 if(REBIT_MELONDS_DUAL_COOPERATIVE)
     target_compile_definitions(core PUBLIC REBIT_MELONDS_DUAL_COOPERATIVE=1)
+    if(REBIT_MELONDS_DOWNLOAD_REPLICA)
+        set(REBIT_COOPERATIVE_BUILD "melonds-download-replica-experimental-1")
+        set(REBIT_COOPERATIVE_ABI "rebit-melonds-download-replica-v1")
+    else()
+        set(REBIT_COOPERATIVE_BUILD "melonds-dual-cooperative-2")
+        set(REBIT_COOPERATIVE_ABI "rebit-melonds-dual-cooperative-2")
+    endif()
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-        REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-2"
-        REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-dual-cooperative-2"
+        REBIT_MELONDS_DUAL_BUILD="${REBIT_COOPERATIVE_BUILD}"
+        REBIT_MELONDS_DUAL_RUNTIME_ABI="${REBIT_COOPERATIVE_ABI}"
         REBIT_MELONDS_DUAL_COOPERATIVE=1
     )
 elseif(REBIT_MELONDS_ROLLBACK)

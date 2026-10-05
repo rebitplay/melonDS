@@ -46,6 +46,47 @@ async function main() {
     const bios7 = bytes('NDS_BIOS7');
     const bios9 = bytes('NDS_BIOS9');
     const firmware = bytes('NDS_FIRMWARE');
+    const replicatedPointers = [rom, bios7, bios9, firmware].map((value) => {
+        const pointer = core._malloc(value.length);
+        assert.ok(pointer);
+        core.HEAPU8.set(value, pointer);
+        return pointer;
+    });
+    try {
+        assert.equal(
+            core._md_load_with_profile(
+                replicatedPointers[0],
+                rom.length,
+                2,
+                0x12345678,
+                0x9abcdef0,
+                3,
+                replicatedPointers[1],
+                bios7.length,
+                replicatedPointers[2],
+                bios9.length,
+                replicatedPointers[3],
+                firmware.length,
+            ),
+            1,
+            error(core),
+        );
+        assert.equal(core._md_boot_profile(), 3);
+        assert.equal(core._md_player_count(), 2);
+        const replicatedStart = core._md_frame(0);
+        for (let frame = 0; frame < 30; frame++) {
+            assert.equal(core._md_set_input(0, 0xfff, 0, 0, 0), 1);
+            assert.equal(core._md_set_input(1, 0xfff, 0, 0, 0), 1);
+            assert.equal(core._md_run_frame(), 1, error(core));
+        }
+        console.log(JSON.stringify({ replicatedStart, frame0: core._md_frame(0), frame1: core._md_frame(1) }));
+        assert.equal(core._md_frame(0), replicatedStart + 30);
+        assert.equal(core._md_frame(1), replicatedStart + 30);
+    } finally {
+        core._md_destroy();
+        for (const pointer of replicatedPointers) core._free(pointer);
+    }
+
     const pointers = [bios7, bios9, firmware].map((value) => {
         const pointer = core._malloc(value.length);
         assert.ok(pointer);
