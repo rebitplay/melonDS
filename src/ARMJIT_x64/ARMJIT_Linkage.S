@@ -104,3 +104,7 @@ ARM_Ret:
 #endif
 
     ret
+
+#ifndef __APPLE__
+.section .note.GNU-stack,"",@progbits
+#endif

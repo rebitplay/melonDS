@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string>
 #include <algorithm>
 #include "Config.h"
@@ -46,6 +47,47 @@ u8 Data;
 
 u8 StatusReg;
 u32 Addr;
+
+static bool ParseHexByte(const char* text, u8* out)
+{
+    if (!isxdigit((unsigned char)text[0]) || !isxdigit((unsigned char)text[1]))
+        return false;
+
+    char byte[3] = { text[0], text[1], 0 };
+    char* end = NULL;
+    long value = strtol(byte, &end, 16);
+    if (end != &byte[2] || value < 0 || value > 0xFF)
+        return false;
+
+    *out = (u8)value;
+    return true;
+}
+
+static bool ParseMACAddress(const char* text, u8 mac[6])
+{
+    if (!text)
+        return false;
+
+    for (int i = 0; i < 6; i++)
+    {
+        if (!ParseHexByte(text + (i * 3), &mac[i]))
+            return false;
+        if (i < 5 && text[(i * 3) + 2] != ':')
+            return false;
+    }
+
+    return text[17] == '\0';
+}
+
+static const char* ConfiguredMACAddress()
+{
+    const char* mac = getenv("MELONDS_MAC_ADDRESS");
+    if (!mac || !mac[0])
+        mac = getenv("REBIT_MELONDS_MAC_ADDRESS");
+    if (!mac || !mac[0])
+        mac = getenv("CLOUD_GAME_MELONDS_MAC_ADDRESS");
+    return mac;
+}
 
 
 u16 CRC16(u8* data, u32 len, u32 start)
@@ -239,7 +281,19 @@ void Reset()
 
     *(u16*)&Firmware[userdata+0x72] = CRC16(&Firmware[userdata], 0x70, 0xFFFF);
 
-    if (Config::RandomizeMAC)
+    u8 configuredMAC[6];
+    const char* configuredMACText = ConfiguredMACAddress();
+    if (ParseMACAddress(configuredMACText, configuredMAC))
+    {
+        memcpy(&Firmware[0x36], configuredMAC, sizeof(configuredMAC));
+        *(u16*)&Firmware[0x2A] = CRC16(&Firmware[0x2C], *(u16*)&Firmware[0x2C], 0x0000);
+        printf("Using configured MAC address: %s\n", configuredMACText);
+    }
+    else if (configuredMACText && configuredMACText[0])
+    {
+        printf("Invalid MELONDS_MAC_ADDRESS: %s\n", configuredMACText);
+    }
+    else if (Config::RandomizeMAC)
     {
         // replace MAC address with random address
         Firmware[0x36] = 0x00;
