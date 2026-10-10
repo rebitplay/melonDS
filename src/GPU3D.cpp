@@ -2577,7 +2577,7 @@ void GPU3D::WriteToGXFIFO(u32 val) noexcept
         if ((CurCommand & 0xFF) || (NumCommands == 4 && CurCommand == 0))
         {
             CmdFIFOEntry entry;
-#ifdef REBIT_MELONDS_ROLLBACK
+#if defined(REBIT_MELONDS_ROLLBACK) || defined(REBIT_MELONDS_ZERO_GPU_FIFO_PADDING)
             entry._contents = 0; // Reserved command bits must not contain host stack bytes.
 #endif
             entry.Command = CurCommand & 0xFF;
@@ -2935,7 +2935,7 @@ void GPU3D::Write32(u32 addr, u32 val) noexcept
     if (addr >= 0x04000440 && addr < 0x040005CC)
     {
         CmdFIFOEntry entry;
-#ifdef REBIT_MELONDS_ROLLBACK
+#if defined(REBIT_MELONDS_ROLLBACK) || defined(REBIT_MELONDS_ZERO_GPU_FIFO_PADDING)
         entry._contents = 0;
 #endif
         entry.Command = (addr & 0x1FC) >> 2;

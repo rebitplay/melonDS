@@ -135,7 +135,21 @@ void SoftRenderer::SetOutputEnabled(bool enabled)
 void SoftRenderer::DrawScanline(u32 line)
 {
     if (!RenderingCurrentFrame)
-        return;
+    {
+        if (!GPU.CaptureEnable)
+            return;
+        // Capture was requested after this frame's skip decision (between
+        // VCOUNT 215 and 0). Its pixels reach emulated VRAM, so produce them
+        // now: rasterize the already latched 3D frame and pre-render this
+        // line's sprites, then continue as a normally rendered frame.
+        RenderingCurrentFrame = true;
+        BeginRasterization();
+        if (GPU.VCount < 192)
+        {
+            Rend2D_A->DrawSprites(GPU.VCount);
+            Rend2D_B->DrawSprites(GPU.VCount);
+        }
+    }
     u32 *dstA, *dstB;
     u32 dstoffset = 256 * line;
     if (GPU.ScreenSwap)
@@ -204,9 +218,26 @@ void SoftRenderer::Start3DRendering()
     // Hidden consoles still emulate their full GPU command stream. Rasterize
     // pixels only when the local seat needs them or when DS display capture
     // will feed those pixels back into emulated VRAM.
-    RenderingCurrentFrame = OutputEnabled || (GPU.CaptureCnt & (1U << 31)) != 0;
+    // This runs at VCOUNT 215: the scanlines of the frame now ending were
+    // governed by the previous decision, which is what SwapBuffers presents.
+    FrameDrawn = RenderingCurrentFrame;
+    RenderingCurrentFrame = (OutputEnabled && !FrameSkipRequested) || (GPU.CaptureCnt & (1U << 31)) != 0;
     if (RenderingCurrentFrame)
-        Renderer::Start3DRendering();
+        BeginRasterization();
+    else
+        static_cast<SoftRenderer3D*>(Rend3D.get())->InvalidateRaster();
+}
+
+void SoftRenderer::BeginRasterization()
+{
+    Renderer::Start3DRendering();
+}
+
+void SoftRenderer::SwapBuffers()
+{
+    // Keep presenting the last complete picture across skipped frames.
+    if (FrameDrawn)
+        BackBuffer ^= 1;
 }
 
 void SoftRenderer::Finish3DRendering()

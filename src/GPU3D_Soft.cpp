@@ -1108,7 +1108,11 @@ void SoftRenderer3D::RenderShadowMaskScanline(
     {
         u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.SetXForDepth(x);
+#else
         interpX.SetX(x);
+#endif
 
         s32 z = interpX.InterpolateZ(zl, zr);
         u32 dstattr = AttrBuffer[pixeladdr];
@@ -1134,7 +1138,11 @@ void SoftRenderer3D::RenderShadowMaskScanline(
     {
         u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.SetXForDepth(x);
+#else
         interpX.SetX(x);
+#endif
 
         s32 z = interpX.InterpolateZ(zl, zr);
         u32 dstattr = AttrBuffer[pixeladdr];
@@ -1160,7 +1168,11 @@ void SoftRenderer3D::RenderShadowMaskScanline(
     {
         u32 pixeladdr = FirstPixelOffset + (y*ScanlineWidth) + x;
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.SetXForDepth(x);
+#else
         interpX.SetX(x);
+#endif
 
         s32 z = interpX.InterpolateZ(zl, zr);
         u32 dstattr = AttrBuffer[pixeladdr];
@@ -1333,6 +1345,11 @@ void SoftRenderer3D::RenderPolygonScanline(
     s32 sr = interp_end->Interpolate(vrcur->TexCoords[0], vrnext->TexCoords[0]);
     s32 tr = interp_end->Interpolate(vrcur->TexCoords[1], vrnext->TexCoords[1]);
 
+#ifdef REBIT_MELONDS_SIMD_ATTRIBUTES
+    const v128_t attributesLeft = wasm_i32x4_make(rl, gl, bl, sl);
+    const v128_t attributesRight = wasm_i32x4_make(rr, gr, br, sr);
+#endif
+
     // in wireframe mode, there are special rules for equal Z (TODO)
 
     int yedge = 0;
@@ -1378,7 +1395,11 @@ void SoftRenderer3D::RenderPolygonScanline(
                 dstattr &= ~0xF; // quick way to prevent drawing the shadow under antialiased edges
         }
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.SetXForDepth(x);
+#else
         interpX.SetX(x);
+#endif
 
         s32 z = interpX.InterpolateZ(zl, zr);
 
@@ -1394,11 +1415,22 @@ void SoftRenderer3D::RenderPolygonScanline(
                 continue;
         }
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.PrepareAttributes();
+#endif
+#ifdef REBIT_MELONDS_SIMD_ATTRIBUTES
+        const v128_t attributes = interpX.Interpolate4(attributesLeft, attributesRight);
+        u32 vr = wasm_i32x4_extract_lane(attributes, 0);
+        u32 vg = wasm_i32x4_extract_lane(attributes, 1);
+        u32 vb = wasm_i32x4_extract_lane(attributes, 2);
+        s16 s = wasm_i32x4_extract_lane(attributes, 3);
+#else
         u32 vr = interpX.Interpolate(rl, rr);
         u32 vg = interpX.Interpolate(gl, gr);
         u32 vb = interpX.Interpolate(bl, br);
 
         s16 s = interpX.Interpolate(sl, sr);
+#endif
         s16 t = interpX.Interpolate(tl, tr);
 
         u32 color = RenderPixel(rp, vr>>3, vg>>3, vb>>3, s, t);
@@ -1474,7 +1506,11 @@ void SoftRenderer3D::RenderPolygonScanline(
                 dstattr &= ~0xF; // quick way to prevent drawing the shadow under antialiased edges
         }
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.SetXForDepth(x);
+#else
         interpX.SetX(x);
+#endif
 
         s32 z = interpX.InterpolateZ(zl, zr);
 
@@ -1490,11 +1526,22 @@ void SoftRenderer3D::RenderPolygonScanline(
                 continue;
         }
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.PrepareAttributes();
+#endif
+#ifdef REBIT_MELONDS_SIMD_ATTRIBUTES
+        const v128_t attributes = interpX.Interpolate4(attributesLeft, attributesRight);
+        u32 vr = wasm_i32x4_extract_lane(attributes, 0);
+        u32 vg = wasm_i32x4_extract_lane(attributes, 1);
+        u32 vb = wasm_i32x4_extract_lane(attributes, 2);
+        s16 s = wasm_i32x4_extract_lane(attributes, 3);
+#else
         u32 vr = interpX.Interpolate(rl, rr);
         u32 vg = interpX.Interpolate(gl, gr);
         u32 vb = interpX.Interpolate(bl, br);
 
         s16 s = interpX.Interpolate(sl, sr);
+#endif
         s16 t = interpX.Interpolate(tl, tr);
 
         u32 color = RenderPixel(rp, vr>>3, vg>>3, vb>>3, s, t);
@@ -1566,7 +1613,11 @@ void SoftRenderer3D::RenderPolygonScanline(
                 dstattr &= ~0xF; // quick way to prevent drawing the shadow under antialiased edges
         }
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.SetXForDepth(x);
+#else
         interpX.SetX(x);
+#endif
 
         s32 z = interpX.InterpolateZ(zl, zr);
 
@@ -1582,11 +1633,22 @@ void SoftRenderer3D::RenderPolygonScanline(
                 continue;
         }
 
+#ifdef REBIT_MELONDS_LATE_PERSPECTIVE
+        interpX.PrepareAttributes();
+#endif
+#ifdef REBIT_MELONDS_SIMD_ATTRIBUTES
+        const v128_t attributes = interpX.Interpolate4(attributesLeft, attributesRight);
+        u32 vr = wasm_i32x4_extract_lane(attributes, 0);
+        u32 vg = wasm_i32x4_extract_lane(attributes, 1);
+        u32 vb = wasm_i32x4_extract_lane(attributes, 2);
+        s16 s = wasm_i32x4_extract_lane(attributes, 3);
+#else
         u32 vr = interpX.Interpolate(rl, rr);
         u32 vg = interpX.Interpolate(gl, gr);
         u32 vb = interpX.Interpolate(bl, br);
 
         s16 s = interpX.Interpolate(sl, sr);
+#endif
         s16 t = interpX.Interpolate(tl, tr);
 
         u32 color = RenderPixel(rp, vr>>3, vg>>3, vb>>3, s, t);
@@ -2001,15 +2063,16 @@ void SoftRenderer3D::RenderFrame()
 #ifdef REBIT_MELONDS_REUSE_RASTER
     // Same eligibility as upstream's raster shortcut, but this derived warm-
     // cache decision is never allowed to alter serialized reference metadata.
-    ReuseRaster = RasterValid && !textureChanged && GPU3D.RenderFrameIdentical;
+    ReuseRaster = RasterValid && !RasterStale && !textureChanged && GPU3D.RenderFrameIdentical;
 #endif
 #ifdef REBIT_MELONDS_DETERMINISTIC
     // Restoring invalidates decoded textures. Do the same raster work with a
     // cold or warm cache; no derived-cache byte exemptions in this reference.
     FrameIdentical = false;
 #else
-    FrameIdentical = !textureChanged && GPU3D.RenderFrameIdentical;
+    FrameIdentical = !textureChanged && GPU3D.RenderFrameIdentical && !RasterStale;
 #endif
+    RasterStale = false;
 
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {

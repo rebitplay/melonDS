@@ -24,6 +24,9 @@
 #include "Platform.h"
 #include <thread>
 #include <atomic>
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
+#endif
 
 namespace melonDS
 {
@@ -59,6 +62,9 @@ public:
     void EnableRenderThread();
     void StopRenderThread();
     void InvalidateTextureCache();
+    // The previous frame was not rasterized, so the retained color/depth
+    // buffers do not correspond to GPU3D's "identical frame" comparison.
+    void InvalidateRaster() noexcept { RasterStale = true; }
 #ifdef REBIT_MELONDS_ROLLBACK
     bool RollbackHealthy() const { return !RollbackRenderFaulted; }
     bool WaitForRollbackRender();
@@ -146,6 +152,24 @@ private:
         {
             x -= x0;
             this->x = x;
+            SetPerspectiveFactor();
+        }
+
+        // Z-buffer depth uses only x. W-buffer depth also needs yfactor.
+        // This interpolator is local to the scanline; no guest state changes.
+        constexpr void SetXForDepth(s32 x)
+        {
+            this->x = x - x0;
+            if (wbuffer) SetPerspectiveFactor();
+        }
+
+        constexpr void PrepareAttributes()
+        {
+            if (!wbuffer) SetPerspectiveFactor();
+        }
+
+        constexpr void SetPerspectiveFactor()
+        {
             if ((xdiff != 0) && ((!linear) || wbuffer))
             {
                 u32 num = (x * w0n) << shift;
@@ -179,6 +203,27 @@ private:
                     return y1 + (s64)(y0-y1) * (xdiff - x) / xdiff;
             }
         }
+
+#ifdef __wasm_simd128__
+        // Same unsigned multiply/shift and signed base as Interpolate().
+        // Keep linear interpolation on its exact signed 64-bit division path.
+        v128_t Interpolate4(v128_t y0, v128_t y1) const
+        {
+            if (xdiff == 0) return y0;
+            if (linear)
+                return wasm_i32x4_make(
+                    Interpolate(wasm_i32x4_extract_lane(y0, 0), wasm_i32x4_extract_lane(y1, 0)),
+                    Interpolate(wasm_i32x4_extract_lane(y0, 1), wasm_i32x4_extract_lane(y1, 1)),
+                    Interpolate(wasm_i32x4_extract_lane(y0, 2), wasm_i32x4_extract_lane(y1, 2)),
+                    Interpolate(wasm_i32x4_extract_lane(y0, 3), wasm_i32x4_extract_lane(y1, 3)));
+            const v128_t base = wasm_i32x4_min(y0, y1);
+            const v128_t difference = wasm_i32x4_sub(wasm_i32x4_max(y0, y1), base);
+            const v128_t factor = wasm_v128_bitselect(
+                wasm_i32x4_splat(yfactor), wasm_i32x4_splat((1U << shift) - yfactor),
+                wasm_i32x4_lt(y0, y1));
+            return wasm_i32x4_add(base, wasm_u32x4_shr(wasm_i32x4_mul(difference, factor), shift));
+        }
+#endif
 
         constexpr s32 InterpolateZ(s32 z0, s32 z1) const
         {
@@ -515,6 +560,7 @@ private:
     bool Enabled;
 
     bool FrameIdentical;
+    bool RasterStale = false;
 #ifdef REBIT_MELONDS_REUSE_RASTER
     // Derived cache decision only; restore always forces fresh rasterization.
     // FrameIdentical retains the conservative reference's serialized value.

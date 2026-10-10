@@ -13,6 +13,22 @@ option(REBIT_MELONDS_DETERMINISTIC_THREADED_RENDERER "Experiment: overlap determ
 option(REBIT_MELONDS_BATCH_RENDER_SCANLINES "Experiment: notify completed software scanlines in groups of eight" OFF)
 option(REBIT_MELONDS_ADAPTIVE_WAIT "Experiment: bound WASM radio-turn spinning before atomic wait" OFF)
 option(REBIT_MELONDS_REUSE_RASTER "Experiment: reuse identical raster output without serializing cache decisions" OFF)
+option(REBIT_MELONDS_LATE_PERSPECTIVE "Experiment: defer Z-buffer perspective division until depth passes" OFF)
+option(REBIT_MELONDS_INDIRECT_DISPATCH "Experiment: use table-based ARM/Thumb dispatch in cooperative WASM" OFF)
+option(REBIT_MELONDS_SIMD_ATTRIBUTES "Experiment: interpolate four raster attributes with WASM SIMD" OFF)
+# Released in melonds-dual-cooperative-4: both default ON for the cooperative
+# WASM profile and remain unavailable elsewhere.
+set(REBIT_MELONDS_COOPERATIVE_WASM_DEFAULT OFF)
+if(EMSCRIPTEN AND REBIT_MELONDS_DUAL_COOPERATIVE)
+    set(REBIT_MELONDS_COOPERATIVE_WASM_DEFAULT ON)
+endif()
+option(REBIT_MELONDS_SPECIALIZED_CPU "Compile full instruction paths separately for ARM9 and ARM7" ${REBIT_MELONDS_COOPERATIVE_WASM_DEFAULT})
+option(REBIT_MELONDS_ZERO_GPU_FIFO_PADDING "Zero reserved GPU FIFO entry bytes in cooperative mode" ${REBIT_MELONDS_COOPERATIVE_WASM_DEFAULT})
+if(REBIT_MELONDS_LATE_PERSPECTIVE OR REBIT_MELONDS_INDIRECT_DISPATCH OR REBIT_MELONDS_SIMD_ATTRIBUTES OR REBIT_MELONDS_SPECIALIZED_CPU OR REBIT_MELONDS_ZERO_GPU_FIFO_PADDING)
+    if(NOT EMSCRIPTEN OR NOT REBIT_MELONDS_DUAL_COOPERATIVE)
+        message(FATAL_ERROR "Core speed experiments require cooperative WASM")
+    endif()
+endif()
 if(REBIT_MELONDS_REUSE_RASTER AND NOT REBIT_MELONDS_DETERMINISTIC)
     message(FATAL_ERROR "Raster reuse experiment requires the deterministic reference")
 endif()
@@ -91,6 +107,53 @@ if(REBIT_MELONDS_ADAPTIVE_WAIT)
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE REBIT_MELONDS_ADAPTIVE_WAIT=1)
 endif()
 target_compile_definitions(core PUBLIC REBIT_MELONDS_NDS_ONLY=1)
+if(REBIT_MELONDS_LATE_PERSPECTIVE)
+    target_compile_definitions(core PUBLIC REBIT_MELONDS_LATE_PERSPECTIVE=1)
+endif()
+if(REBIT_MELONDS_INDIRECT_DISPATCH)
+    target_compile_definitions(core PUBLIC REBIT_MELONDS_INDIRECT_DISPATCH=1)
+endif()
+if(REBIT_MELONDS_SIMD_ATTRIBUTES)
+    target_compile_definitions(core PUBLIC REBIT_MELONDS_SIMD_ATTRIBUTES=1)
+endif()
+if(REBIT_MELONDS_ZERO_GPU_FIFO_PADDING)
+    target_compile_definitions(core PRIVATE REBIT_MELONDS_ZERO_GPU_FIFO_PADDING=1)
+endif()
+if(REBIT_MELONDS_SPECIALIZED_CPU)
+    if(NOT REBIT_MELONDS_ZERO_GPU_FIFO_PADDING)
+        message(FATAL_ERROR "CPU specialization requires deterministic GPU FIFO padding for checkpoint validation")
+    endif()
+    if(REBIT_MELONDS_INDIRECT_DISPATCH)
+        message(FATAL_ERROR "CPU specialization and indirect dispatch are separate experiments")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(CPU_SPECIALIZED_DIR "${CMAKE_CURRENT_BINARY_DIR}/cpu-specialized")
+    set(CPU_SPECIALIZED_SOURCES)
+    set(CPU_SPECIALIZED_INPUTS)
+    foreach(CPU_NUM 0 1)
+        foreach(CPU_PART ARMInterpreter ARMInterpreter_ALU ARMInterpreter_LoadStore ARMInterpreter_Branch)
+            list(APPEND CPU_SPECIALIZED_SOURCES "${CPU_SPECIALIZED_DIR}/CPU${CPU_NUM}_${CPU_PART}.cpp")
+            list(APPEND CPU_SPECIALIZED_INPUTS "${MELONDS_SOURCE_DIR}/src/${CPU_PART}.cpp")
+        endforeach()
+        list(APPEND CPU_SPECIALIZED_SOURCES "${CPU_SPECIALIZED_DIR}/CPU${CPU_NUM}_Dispatch.cpp")
+    endforeach()
+    add_custom_command(
+        OUTPUT ${CPU_SPECIALIZED_SOURCES} "${CPU_SPECIALIZED_DIR}/CPUInterpreters.h"
+        COMMAND ${Python3_EXECUTABLE} "${MELONDS_SOURCE_DIR}/research/generate-specialized-cpu.py" "${CPU_SPECIALIZED_DIR}"
+        DEPENDS ${CPU_SPECIALIZED_INPUTS} "${MELONDS_SOURCE_DIR}/src/ARM_InstrTable.h"
+            "${MELONDS_SOURCE_DIR}/research/generate-specialized-cpu.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/generate_arm_dispatch.py"
+        VERBATIM
+    )
+    add_custom_target(rebit_cpu_generation DEPENDS ${CPU_SPECIALIZED_SOURCES} "${CPU_SPECIALIZED_DIR}/CPUInterpreters.h")
+    add_dependencies(core rebit_cpu_generation)
+    set_source_files_properties(${CPU_SPECIALIZED_SOURCES} "${CPU_SPECIALIZED_DIR}/CPUInterpreters.h"
+        TARGET_DIRECTORY core PROPERTIES GENERATED TRUE)
+    target_sources(core PRIVATE ${CPU_SPECIALIZED_SOURCES} "${CPU_SPECIALIZED_DIR}/CPUInterpreters.h")
+    target_include_directories(core PRIVATE "${CPU_SPECIALIZED_DIR}" "${MELONDS_SOURCE_DIR}/src")
+    target_compile_definitions(core PRIVATE REBIT_MELONDS_SPECIALIZED_CPU=1)
+    target_link_options(melonds_dual PRIVATE "--emit-symbol-map")
+endif()
 if(REBIT_MELONDS_ROLLBACK)
     target_compile_definitions(core PUBLIC REBIT_MELONDS_ROLLBACK=1)
 endif()
@@ -113,7 +176,7 @@ set_property(TARGET ${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PROPERTY CXX_STANDARD 2
 if(REBIT_MELONDS_DUAL_COOPERATIVE)
     target_compile_definitions(core PUBLIC REBIT_MELONDS_DUAL_COOPERATIVE=1)
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-        REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-3"
+        REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-4"
         REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-dual-cooperative-2"
         REBIT_MELONDS_DUAL_COOPERATIVE=1
     )
@@ -195,7 +258,7 @@ if(EMSCRIPTEN)
         "-sNO_EXIT_RUNTIME=1"
         "-sDISABLE_EXCEPTION_CATCHING=0"
         "-sEXPORTED_RUNTIME_METHODS=['HEAPU8','HEAPU32','HEAP16','ccall','cwrap','UTF8ToString']"
-        "-sEXPORTED_FUNCTIONS=['_malloc','_free','_md_api_version','_md_runtime_abi','_md_load','_md_load_with_profile','_md_boot_profile','_md_destroy','_md_is_loaded','_md_player_count','_md_set_visible_player','_md_visible_player','_md_set_input','_md_run_frame','_md_frame','_md_framebuffer','_md_width','_md_height','_md_audio_sample_rate','_md_audio_available','_md_audio_read','_md_audio_buffer','_md_save_size','_md_save_data','_md_import_save','_md_export_checkpoint','_md_checkpoint_size','_md_checkpoint_data','_md_clear_checkpoint','_md_import_checkpoint','_md_set_scheduler_jitter','_md_inject_desync_for_test','_md_state_hash','_md_mp_packets_sent','_md_mp_packets_received','_md_mp_commands','_md_mp_replies','_md_mp_network_waits','_md_mp_network_wait_reason','_md_mp_outgoing_size','_md_mp_outgoing_data','_md_mp_outgoing_clear','_md_mp_set_external_connected','_md_mp_inject','_md_last_frame_ms','_md_build_id','_md_last_error']"
+        "-sEXPORTED_FUNCTIONS=['_malloc','_free','_md_api_version','_md_runtime_abi','_md_load','_md_load_with_profile','_md_boot_profile','_md_destroy','_md_is_loaded','_md_player_count','_md_set_visible_player','_md_visible_player','_md_set_frame_skip','_md_frame_drawn','_md_set_input','_md_run_frame','_md_frame','_md_framebuffer','_md_width','_md_height','_md_audio_sample_rate','_md_audio_available','_md_audio_read','_md_audio_buffer','_md_save_size','_md_save_data','_md_import_save','_md_export_checkpoint','_md_checkpoint_size','_md_checkpoint_data','_md_clear_checkpoint','_md_import_checkpoint','_md_set_scheduler_jitter','_md_inject_desync_for_test','_md_state_hash','_md_mp_packets_sent','_md_mp_packets_received','_md_mp_commands','_md_mp_replies','_md_mp_network_waits','_md_mp_network_wait_reason','_md_mp_outgoing_size','_md_mp_outgoing_data','_md_mp_outgoing_clear','_md_mp_set_external_connected','_md_mp_inject','_md_last_frame_ms','_md_build_id','_md_last_error']"
     )
 
     if(REBIT_MELONDS_DUAL_COOPERATIVE)

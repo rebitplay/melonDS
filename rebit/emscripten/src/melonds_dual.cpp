@@ -1370,6 +1370,23 @@ REBIT_EXPORT int md_visible_player()
     return rebit::State.visiblePlayer;
 }
 
+// Host presentation pacing. While set, upcoming frames produce no pixels
+// (unless DS display capture needs them); CPU, GPU command processing, audio,
+// timing and all serialized guest state advance exactly as when rendering.
+REBIT_EXPORT void md_set_frame_skip(int skip)
+{
+    for (const auto& slot : rebit::State.slots)
+        slot->console->GetRenderer().SetFrameSkip(skip != 0);
+}
+
+// 1 when the most recently completed frame produced a new picture for the
+// visible player; 0 when md_framebuffer() still holds an earlier picture.
+REBIT_EXPORT int md_frame_drawn()
+{
+    auto* slot = rebit::GetSlot(rebit::State.visiblePlayer);
+    return slot && slot->console->GetRenderer().LastFrameDrawn() ? 1 : 0;
+}
+
 #ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
 REBIT_EXPORT int md_set_render_all(int enabled)
 {

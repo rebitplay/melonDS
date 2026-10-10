@@ -45,6 +45,9 @@ public:
 
     void SetRenderSettings(RendererSettings& settings) override;
     void SetOutputEnabled(bool enabled) override;
+    void SetFrameSkip(bool skip) override { FrameSkipRequested = skip; }
+    bool LastFrameDrawn() const override { return FrameDrawn; }
+    void SwapBuffers() override;
 
     void DrawScanline(u32 line) override;
     void DrawSprites(u32 line) override;
@@ -72,6 +75,11 @@ private:
     bool OutputEnabled = true;
     bool ThreadedOutput = false;
     bool RenderingCurrentFrame = true;
+    // Host presentation pacing only; never serialized and never guest-visible.
+    bool FrameSkipRequested = false;
+    bool FrameDrawn = true;
+
+    void BeginRasterization();
 
     void DrawScanlineA(u32 line, u32* dst);
     void DrawScanlineB(u32 line, u32* dst);

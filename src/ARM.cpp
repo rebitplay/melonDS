@@ -23,6 +23,9 @@
 #include "DSi.h"
 #include "ARM.h"
 #include "ARMInterpreter.h"
+#ifdef REBIT_MELONDS_SPECIALIZED_CPU
+#include "CPUInterpreters.h"
+#endif
 #include "AREngine.h"
 #include "ARMJIT.h"
 #include "Platform.h"
@@ -689,7 +692,9 @@ void ARMv5::Execute()
 
                 // actually execute
                 u32 icode = (CurInstr >> 6) & 0x3FF;
-#ifdef __EMSCRIPTEN__
+#if defined(REBIT_MELONDS_SPECIALIZED_CPU)
+                CPU0Interpreter::DispatchTHUMB(this, icode);
+#elif defined(__EMSCRIPTEN__) && !defined(REBIT_MELONDS_INDIRECT_DISPATCH)
                 ARMInterpreter::DispatchTHUMB(this, icode);
 #else
                 ARMInterpreter::THUMBInstrTable[icode](this);
@@ -710,7 +715,9 @@ void ARMv5::Execute()
                 if (CheckCondition(CurInstr >> 28))
                 {
                     u32 icode = ((CurInstr >> 4) & 0xF) | ((CurInstr >> 16) & 0xFF0);
-#ifdef __EMSCRIPTEN__
+#if defined(REBIT_MELONDS_SPECIALIZED_CPU)
+                    CPU0Interpreter::DispatchARM(this, icode);
+#elif defined(__EMSCRIPTEN__) && !defined(REBIT_MELONDS_INDIRECT_DISPATCH)
                     ARMInterpreter::DispatchARM(this, icode);
 #else
                     ARMInterpreter::ARMInstrTable[icode](this);
@@ -835,7 +842,9 @@ void ARMv4::Execute()
 
                 // actually execute
                 u32 icode = (CurInstr >> 6);
-#ifdef __EMSCRIPTEN__
+#if defined(REBIT_MELONDS_SPECIALIZED_CPU)
+                CPU1Interpreter::DispatchTHUMB(this, icode);
+#elif defined(__EMSCRIPTEN__) && !defined(REBIT_MELONDS_INDIRECT_DISPATCH)
                 ARMInterpreter::DispatchTHUMB(this, icode);
 #else
                 ARMInterpreter::THUMBInstrTable[icode](this);
@@ -856,7 +865,9 @@ void ARMv4::Execute()
                 if (CheckCondition(CurInstr >> 28))
                 {
                     u32 icode = ((CurInstr >> 4) & 0xF) | ((CurInstr >> 16) & 0xFF0);
-#ifdef __EMSCRIPTEN__
+#if defined(REBIT_MELONDS_SPECIALIZED_CPU)
+                    CPU1Interpreter::DispatchARM(this, icode);
+#elif defined(__EMSCRIPTEN__) && !defined(REBIT_MELONDS_INDIRECT_DISPATCH)
                     ARMInterpreter::DispatchARM(this, icode);
 #else
                     ARMInterpreter::ARMInstrTable[icode](this);

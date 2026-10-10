@@ -849,6 +849,10 @@ public:
 
     virtual void SetRenderSettings(RendererSettings& settings) = 0;
     virtual void SetOutputEnabled(bool enabled) { (void)enabled; }
+    // Presentation frameskip: the next frame's pixels are not produced unless
+    // display capture needs them. Emulated state and timing are unaffected.
+    virtual void SetFrameSkip(bool skip) { (void)skip; }
+    virtual bool LastFrameDrawn() const { return true; }
 
     virtual void DrawScanline(u32 line) = 0;
     virtual void DrawSprites(u32 line) = 0;

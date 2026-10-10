@@ -804,7 +804,9 @@ void Wifi::FireTX()
 
 void Wifi::SendMPDefaultReply()
 {
-    u8 reply[12 + 28];
+    // Zero the unwritten TX header bytes: they are transmitted to the peer
+    // console and must not depend on host stack contents.
+    u8 reply[12 + 28] = {};
 
     *(u16*)&reply[0xA] = 28; // length
 
@@ -898,7 +900,7 @@ void Wifi::SendMPReply(u16 clienttime, u16 clientmask)
 
 void Wifi::SendMPAck(u16 cmdcount, u16 clientfail)
 {
-    u8 ack[12 + 32];
+    u8 ack[12 + 32] = {};
 
     *(u16*)&ack[0xA] = 32; // length
 
