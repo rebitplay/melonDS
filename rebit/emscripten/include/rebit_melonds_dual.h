@@ -45,6 +45,7 @@ int md_audio_read_player(int player, int16_t* output, int maximum_frames);
 uint32_t md_save_size(int player);
 const uint8_t* md_save_data(int player);
 int md_import_save(int player, const uint8_t* data, uint32_t length);
+int md_reboot_player(int player, const uint8_t* data, uint32_t length);
 
 int md_export_checkpoint(void);
 uint32_t md_checkpoint_size(void);

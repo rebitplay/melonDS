@@ -1140,6 +1140,35 @@ REBIT_EXPORT int md_import_save(int player, const std::uint8_t* data, std::uint3
     return 1;
 }
 
+REBIT_EXPORT int md_reboot_player(int player, const std::uint8_t* data, std::uint32_t length)
+{
+    // Restarts one console with a player's save; games read saves only at boot.
+    // Call between frames. A null save boots a blank cartridge save, so a seat
+    // never inherits the previous occupant's progress.
+    using namespace rebit;
+    auto* slot = GetSlot(player);
+    if (!State.loaded || !slot || !slot->console)
+        return 0;
+
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    auto& console = *slot->console;
+    const std::uint32_t expected = console.GetNDSSaveLength();
+    if (expected == 0 || (data && length != expected))
+        return 0;
+
+    std::vector<std::uint8_t> save = data
+        ? std::vector<std::uint8_t>(data, data + length)
+        : std::vector<std::uint8_t>(expected, 0xFF);
+    console.Reset();
+    console.SetNDSSave(save.data(), expected);
+    slot->context.latestSave = std::move(save);
+    console.RTC.SetDateTime(2000, 1, 1, 0, 0, 0);
+    console.SetupDirectBoot("rebit.nds");
+    console.Start();
+    slot->input = {};
+    return 1;
+}
+
 REBIT_EXPORT int md_export_checkpoint()
 {
     return rebit::ExportCheckpoint() ? 1 : 0;
