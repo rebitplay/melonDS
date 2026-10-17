@@ -27,6 +27,7 @@ int md_player_count(void);
 
 void md_set_visible_player(int player);
 int md_visible_player(void);
+int md_set_output_players(uint32_t mask);
 int md_set_input(int player, uint32_t keys, int touching, int touch_x, int touch_y);
 int md_run_frame(void);
 uint32_t md_frame(int player);
@@ -39,6 +40,7 @@ int md_audio_sample_rate(void);
 int md_audio_available(void);
 int md_audio_read(int maximum_frames);
 const int16_t* md_audio_buffer(void);
+int md_audio_read_player(int player, int16_t* output, int maximum_frames);
 
 uint32_t md_save_size(int player);
 const uint8_t* md_save_data(int player);

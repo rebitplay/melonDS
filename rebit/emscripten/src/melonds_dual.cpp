@@ -995,6 +995,23 @@ REBIT_EXPORT int md_visible_player()
     return rebit::State.visiblePlayer;
 }
 
+// Host streaming presents every console at once. Each set bit enables that
+// console's video and audio output; the visible player is left unchanged.
+REBIT_EXPORT int md_set_output_players(std::uint32_t mask)
+{
+    using namespace rebit;
+    const std::uint32_t valid = (1U << State.slots.size()) - 1U;
+    if (State.slots.empty() || mask == 0 || (mask & ~valid) != 0)
+        return 0;
+    for (const auto& slot : State.slots)
+    {
+        const bool enabled = ((mask >> slot->context.id) & 1U) != 0;
+        slot->console->GetRenderer().SetOutputEnabled(enabled);
+        slot->console->SPU.SetOutputEnabled(enabled);
+    }
+    return 1;
+}
+
 REBIT_EXPORT int md_set_input(int player, std::uint32_t keys, int touching, int touchX, int touchY)
 {
     auto* slot = rebit::GetSlot(player);
@@ -1085,6 +1102,15 @@ REBIT_EXPORT int md_audio_read(int maximumFrames)
 REBIT_EXPORT const std::int16_t* md_audio_buffer()
 {
     return rebit::State.audio.data();
+}
+
+REBIT_EXPORT int md_audio_read_player(int player, std::int16_t* output, int maximumFrames)
+{
+    auto* slot = rebit::GetSlot(player);
+    if (!slot || !slot->console || !output)
+        return 0;
+    const int requested = std::clamp(maximumFrames, 0, rebit::AudioScratchFrames);
+    return slot->console->SPU.ReadOutput(output, requested);
 }
 
 REBIT_EXPORT std::uint32_t md_save_size(int player)
