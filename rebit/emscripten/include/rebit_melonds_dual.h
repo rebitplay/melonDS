@@ -46,6 +46,8 @@ uint32_t md_save_size(int player);
 const uint8_t* md_save_data(int player);
 int md_import_save(int player, const uint8_t* data, uint32_t length);
 int md_reboot_player(int player, const uint8_t* data, uint32_t length);
+int md_set_player_profile(int player, const uint16_t* nickname, uint32_t nickname_length,
+                          int language, int realtime_clock, int32_t utc_offset_seconds);
 
 int md_export_checkpoint(void);
 uint32_t md_checkpoint_size(void);

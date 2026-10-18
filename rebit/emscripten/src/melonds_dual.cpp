@@ -8,6 +8,8 @@
 #include "NDSCart.h"
 #include "Savestate.h"
 #include "SPI_Firmware.h"
+#include <cstring>
+#include <ctime>
 
 #include <algorithm>
 #include <array>
@@ -88,6 +90,10 @@ struct Slot
     std::uint64_t observedGeneration = 0;
     int multiplayerPacketReceivePolls = 0;
     int multiplayerHostReceivePolls = 0;
+    // The player's clock: their offset from UTC, applied at boot. Without one the
+    // console boots at 2000-01-01 00:00 so runs stay reproducible.
+    bool realtimeClock = false;
+    std::int32_t utcOffsetSeconds = 0;
 };
 
 struct Runtime
@@ -647,6 +653,47 @@ void StopRuntime()
 #endif
 }
 
+// Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+void CivilFromDays(std::int64_t days, int& year, int& month, int& day)
+{
+    days += 719468;
+    const std::int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+    const auto dayOfEra = static_cast<unsigned>(days - era * 146097);
+    const unsigned yearOfEra = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36524 - dayOfEra / 146096) / 365;
+    const unsigned dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100);
+    const unsigned shifted = (5 * dayOfYear + 2) / 153;
+    day = static_cast<int>(dayOfYear - (153 * shifted + 2) / 5 + 1);
+    month = static_cast<int>(shifted < 10 ? shifted + 3 : shifted - 9);
+    year = static_cast<int>(static_cast<std::int64_t>(yearOfEra) + era * 400 + (month <= 2));
+}
+
+void SetBootClock(melonDS::NDS& console, const Slot& slot)
+{
+    if (!slot.realtimeClock)
+    {
+        console.RTC.SetDateTime(2000, 1, 1, 0, 0, 0);
+        return;
+    }
+    const std::int64_t local = static_cast<std::int64_t>(std::time(nullptr)) + slot.utcOffsetSeconds;
+    std::int64_t days = local / 86400;
+    std::int64_t seconds = local % 86400;
+    if (seconds < 0)
+    {
+        seconds += 86400;
+        --days;
+    }
+    int year = 2000, month = 1, day = 1;
+    CivilFromDays(days, year, month, day);
+    // The DS clock holds 2000–2099.
+    if (year < 2000 || year > 2099)
+    {
+        console.RTC.SetDateTime(2000, 1, 1, 0, 0, 0);
+        return;
+    }
+    console.RTC.SetDateTime(year, month, day, static_cast<int>(seconds / 3600),
+        static_cast<int>(seconds / 60 % 60), static_cast<int>(seconds % 60));
+}
+
 std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32_t romLength, Slot& slot, std::uint64_t seed)
 {
     melonDS::Firmware firmware(0);
@@ -680,7 +727,7 @@ std::unique_ptr<melonDS::NDS> CreateConsole(const std::uint8_t* rom, std::uint32
 
     console->SetNDSCart(std::move(cart));
     console->Reset();
-    console->RTC.SetDateTime(2000, 1, 1, 0, 0, 0);
+    SetBootClock(*console, slot);
     console->SetupDirectBoot("rebit.nds");
 
     melonDS::RendererSettings rendererSettings {
@@ -1162,10 +1209,53 @@ REBIT_EXPORT int md_reboot_player(int player, const std::uint8_t* data, std::uin
     console.Reset();
     console.SetNDSSave(save.data(), expected);
     slot->context.latestSave = std::move(save);
-    console.RTC.SetDateTime(2000, 1, 1, 0, 0, 0);
+    SetBootClock(console, *slot);
     console.SetupDirectBoot("rebit.nds");
     console.Start();
     slot->input = {};
+    return 1;
+}
+
+REBIT_EXPORT int md_set_player_profile(int player, const std::uint16_t* nickname, std::uint32_t nicknameLength,
+    int language, int realtimeClock, std::int32_t utcOffsetSeconds)
+{
+    // Sets one console's firmware nickname and language and its clock. They
+    // take effect when that console next boots (md_reboot_player).
+    using namespace rebit;
+    auto* slot = GetSlot(player);
+    if (!State.loaded || !slot || !slot->console || nicknameLength == 0 || nicknameLength > 10 || !nickname
+        || language < melonDS::Firmware::Japanese || language > melonDS::Firmware::Chinese
+        || utcOffsetSeconds < -14 * 3600 || utcOffsetSeconds > 14 * 3600)
+        return 0;
+
+    std::lock_guard<std::mutex> guard(State.frameMutex);
+    auto& firmware = slot->console->GetFirmware();
+    auto& header = firmware.GetHeader();
+    const auto chosen = static_cast<melonDS::Firmware::Language>(language);
+    const bool extended = chosen == melonDS::Firmware::Chinese;
+    if (extended && !(header.ConsoleType & 0x40))
+        header.ConsoleType = header.ConsoleType == 0xFF ? 0x43 : header.ConsoleType | 0x43;
+    // Both copies, so whichever the console treats as current carries the profile.
+    for (auto& user : firmware.GetUserData())
+    {
+        std::memset(user.Nickname, 0, sizeof(user.Nickname));
+        for (std::uint32_t index = 0; index < nicknameLength; ++index)
+            user.Nickname[index] = static_cast<char16_t>(nickname[index]);
+        user.NameLength = static_cast<std::uint16_t>(nicknameLength);
+        user.Settings = static_cast<std::uint16_t>((user.Settings & ~0x7u)
+            | (extended ? melonDS::Firmware::English : chosen));
+        if (extended || user.ExtendedSettings.Unknown0 == 0x01)
+        {
+            user.ExtendedSettings.Unknown0 = 0x01;
+            user.ExtendedSettings.ExtendedLanguage = chosen;
+            user.ExtendedSettings.SupportedLanguageMask = 0x7F;
+        }
+        user.UpdateChecksum();
+    }
+    header.UpdateChecksum();
+    firmware.UpdateChecksums();
+    slot->realtimeClock = realtimeClock != 0;
+    slot->utcOffsetSeconds = utcOffsetSeconds;
     return 1;
 }
 
