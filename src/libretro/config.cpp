@@ -47,6 +47,7 @@ namespace Config
     char DSiSDPath[1024];
 
     int RandomizeMAC;
+    int RebitWfcOnline;
 
 #ifdef JIT_ENABLED
     int JIT_Enable = true;

@@ -410,6 +410,10 @@ static void check_variables(bool init)
       toggle_swap_screen = !strcmp(var.value, "Toggle");
    }
 
+   var.key = "melonds_wfc_online";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      Config::RebitWfcOnline = !strcmp(var.value, "enabled");
+
    var.key = "melonds_randomize_mac_address";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {

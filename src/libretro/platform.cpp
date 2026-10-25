@@ -29,6 +29,11 @@
 #include "libui_sdl/LAN_Socket.h"
 #endif
 
+#ifdef REBIT_WFC
+#include "../Config.h"
+#include "wfc/LAN_Wfc.h"
+#endif
+
 #ifdef HAVE_LIBNX
 #include <switch/services/bsd.h>
 #endif
@@ -361,6 +366,10 @@ namespace Platform
 
    bool LAN_Init()
    {
+#ifdef REBIT_WFC
+    if (Config::RebitWfcOnline)
+        return LAN_Wfc::Init();
+#endif
 #ifdef HAVE_PCAP
     if (Config::DirectLAN)
     {
@@ -381,6 +390,9 @@ namespace Platform
 
    void LAN_DeInit()
    {
+#ifdef REBIT_WFC
+      LAN_Wfc::DeInit();
+#endif
       // checkme. blarg
       //if (Config::DirectLAN)
       //    LAN_PCap::DeInit();
@@ -394,6 +406,10 @@ namespace Platform
 
    int LAN_SendPacket(u8* data, int len)
    {
+#ifdef REBIT_WFC
+      if (Config::RebitWfcOnline)
+         return LAN_Wfc::SendPacket(data, len);
+#endif
 #ifdef HAVE_PCAP
       if (Config::DirectLAN)
          return LAN_PCap::SendPacket(data, len);
@@ -406,6 +422,10 @@ namespace Platform
 
    int LAN_RecvPacket(u8* data)
    {
+#ifdef REBIT_WFC
+      if (Config::RebitWfcOnline)
+         return LAN_Wfc::RecvPacket(data);
+#endif
 #ifdef HAVE_PCAP
       if (Config::DirectLAN)
          return LAN_PCap::RecvPacket(data);
