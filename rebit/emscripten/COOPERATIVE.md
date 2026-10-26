@@ -1,5 +1,17 @@
 # Cooperative WebView runtime
 
+`melonds-dual-cooperative-5` (ABI `rebit-melonds-dual-cooperative-3`) adds
+per-seat cartridges for cross-version play such as Pokemon Diamond with Pearl.
+`md_stage_rom(player, length)` returns a core-owned buffer to fill and
+`md_load_staged(players, seed)` boots each seat from its own buffer; a seat left
+unstaged runs seat 0's ROM. Each staged buffer is released once its cartridge
+has been parsed, so the heap peak for two different games matches the older
+single-ROM path, which kept the caller's ROM allocation for the whole session.
+`md_load()` is unchanged. `tests/proof-cross-rom.cjs` proves the staged and legacy
+paths reproduce cooperative-4 exactly with one ROM, and that two different
+cartridges stay deterministic and recover from a checkpoint.
+
+
 `melonds-dual-cooperative-3` runs both DS consoles in a single WASM worker. It
 includes the local wireless reply barrier from `21abbb21`: a host cannot complete
 a command until every connected local client has processed it and replied.

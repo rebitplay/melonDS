@@ -43,6 +43,12 @@ int md_load_with_profile(
     uint32_t bios9_length,
     const uint8_t* firmware,
     uint32_t firmware_length);
+/* Per-seat cartridges for replicated Local Wireless.  md_stage_rom() returns a
+ * core-owned buffer of `length` bytes for the caller to fill; md_load_staged()
+ * boots every seat from its own buffer (seats left unstaged run seat 0's ROM)
+ * and always releases the staged buffers. */
+uint8_t* md_stage_rom(int player, uint32_t length);
+int md_load_staged(int players, uint32_t seed_low, uint32_t seed_high);
 int md_boot_profile(void);
 void md_destroy(void);
 int md_is_loaded(void);

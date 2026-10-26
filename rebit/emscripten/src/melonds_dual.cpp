@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <vector>
@@ -138,6 +139,10 @@ struct Runtime
     bool loaded = false;
     double lastFrameMs = 0.0;
     int bootProfile = REBIT_MELONDS_DUAL_BOOT_REPLICATED;
+    // Per-player cartridges written by md_stage_rom() and consumed by
+    // md_load_staged().
+    std::array<std::unique_ptr<std::uint8_t[]>, MaximumPlayers> stagedRoms {};
+    std::array<std::uint32_t, MaximumPlayers> stagedRomLengths {};
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     std::uint64_t cooperativeSlices = 0;
     // A single-console Download Play runtime can reach a LocalMP receive
@@ -942,6 +947,13 @@ std::unique_ptr<melonDS::NDS> CreateConsole(
     return console;
 }
 
+void ClearStagedRoms() noexcept
+{
+    for (auto& rom : State.stagedRoms)
+        rom.reset();
+    State.stagedRomLengths.fill(0);
+}
+
 Slot* GetSlot(int player) noexcept
 {
     if (player < 0 || player >= static_cast<int>(State.slots.size()))
@@ -1323,6 +1335,121 @@ REBIT_EXPORT int md_load(
         0);
 }
 
+REBIT_EXPORT std::uint8_t* md_stage_rom(int player, std::uint32_t length)
+{
+    using namespace rebit;
+    State.error.clear();
+    if (player < 0 || player >= MaximumPlayers || length < 4096)
+    {
+        State.error = "Nintendo DS staged ROM seat or size is invalid.";
+        return nullptr;
+    }
+    State.stagedRoms[player].reset();
+    State.stagedRomLengths[player] = 0;
+    std::unique_ptr<std::uint8_t[]> rom(new (std::nothrow) std::uint8_t[length]);
+    if (!rom)
+    {
+        State.error = "Could not allocate the staged Nintendo DS ROM.";
+        return nullptr;
+    }
+    State.stagedRoms[player] = std::move(rom);
+    State.stagedRomLengths[player] = length;
+    return State.stagedRoms[player].get();
+}
+
+// Replicated Local Wireless where every seat may run its own cartridge, such
+// as Pokemon Diamond beside Pearl. A seat without a staged ROM runs a copy of
+// seat 0's. Staged buffers are always consumed, even when loading fails.
+REBIT_EXPORT int md_load_staged(int players, std::uint32_t seedLow, std::uint32_t seedHigh)
+{
+    using namespace rebit;
+    StopRuntime();
+    State.error.clear();
+
+    std::array<std::unique_ptr<std::uint8_t[]>, MaximumPlayers> roms {};
+    std::array<std::uint32_t, MaximumPlayers> lengths {};
+    for (int player = 0; player < MaximumPlayers; ++player)
+    {
+        roms[player] = std::move(State.stagedRoms[player]);
+        lengths[player] = State.stagedRomLengths[player];
+    }
+    ClearStagedRoms();
+
+    if (players < MinimumPlayers || players > MaximumPlayers)
+    {
+        State.error = "NDS Local Wireless requires between two and four players.";
+        return 0;
+    }
+    if (!roms[0] || lengths[0] < 4096)
+    {
+        State.error = "Nintendo DS ROM data is missing or too small.";
+        return 0;
+    }
+    for (int player = players; player < MaximumPlayers; ++player)
+    {
+        if (roms[player])
+        {
+            State.error = "A Nintendo DS ROM was staged for a seat outside the room.";
+            return 0;
+        }
+    }
+
+    try
+    {
+        State.multiplayer = std::make_unique<melonDS::LocalMP>();
+        State.multiplayer->SetRecvTimeout(LocalMultiplayerReceiveTimeoutMs);
+        const std::uint64_t seed = static_cast<std::uint64_t>(seedLow) | (static_cast<std::uint64_t>(seedHigh) << 32);
+
+        for (int player = 0; player < players; ++player)
+        {
+            auto slot = std::make_unique<Slot>();
+            slot->context.id = player;
+            const int source = roms[player] ? player : 0;
+            slot->console = CreateConsole(
+                roms[source].get(),
+                lengths[source],
+                *slot,
+                seed,
+                REBIT_MELONDS_DUAL_BOOT_REPLICATED,
+                FirmwareAssets {});
+            // The cartridge keeps its own copy. Release each staged ROM as
+            // soon as possible so two large games never sit in the heap twice.
+            if (source != 0)
+                roms[player].reset();
+            if (!slot->console)
+            {
+                State.error = "Standalone melonDS rejected the Nintendo DS ROM for player ";
+                State.error += static_cast<char>('1' + player);
+                State.error += '.';
+                StopRuntime();
+                return 0;
+            }
+            State.slots.push_back(std::move(slot));
+        }
+        roms[0].reset();
+
+#ifndef REBIT_MELONDS_DUAL_COOPERATIVE
+        for (auto& slot : State.slots)
+            slot->worker = std::thread(WorkerLoop, slot.get());
+#endif
+
+        State.bootProfile = REBIT_MELONDS_DUAL_BOOT_REPLICATED;
+        State.loaded = true;
+        return 1;
+    }
+    catch (const std::exception& exception)
+    {
+        State.error = exception.what();
+    }
+    catch (...)
+    {
+        State.error = "Unknown error while starting NDS Local Wireless.";
+    }
+
+    StopRuntime();
+    return 0;
+}
+
 REBIT_EXPORT int md_boot_profile()
 {
     return rebit::State.bootProfile;
@@ -1331,6 +1458,7 @@ REBIT_EXPORT int md_boot_profile()
 REBIT_EXPORT void md_destroy()
 {
     rebit::StopRuntime();
+    rebit::ClearStagedRoms();
 }
 
 REBIT_EXPORT int md_is_loaded()
