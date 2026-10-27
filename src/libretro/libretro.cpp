@@ -25,7 +25,7 @@
 #include "utils.h"
 
 #ifdef __EMSCRIPTEN__
-#include <emscripten/emscripten.h>
+#include <emscripten/em_macros.h>
 #include "rebit_mic.h"
 static RebitMicBuffer rebitMic;
 static unsigned int rebitMicSamples = 0;
