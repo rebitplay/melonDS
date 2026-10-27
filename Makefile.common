@@ -154,3 +154,27 @@ INCFLAGS += -I$(MELON_DIR)/ARMJIT_x64/
 
 DEFINES += -DARCHITECTURE_X64
 endif
+
+# Rebit WFC: online play through the Rebit proxy. libslirp runs in the core and
+# its socket calls go to a non-blocking WebSocket transport (web builds only).
+ifeq ($(platform), emscripten)
+REBIT_WFC ?= 1
+endif
+
+ifeq ($(REBIT_WFC), 1)
+WFC_DIR    := $(CORE_DIR)/wfc
+SLIRP_DIR  := $(WFC_DIR)/libslirp
+SLIRP_SOURCES := $(addprefix $(SLIRP_DIR)/src/, arp_table.c bootp.c cksum.c dhcpv6.c dnssearch.c if.c \
+                 ip6_icmp.c ip6_input.c ip6_output.c ip_icmp.c ip_input.c ip_output.c mbuf.c misc.c \
+                 ncsi.c ndp_table.c sbuf.c slirp.c socket.c state.c stream.c tcp_input.c tcp_output.c \
+                 tcp_subr.c tcp_timer.c tftp.c udp6.c udp.c util.c version.c vmstate.c) \
+                 $(SLIRP_DIR)/glib/glib.c
+
+SOURCES_C   += $(SLIRP_SOURCES) $(WFC_DIR)/rebit_wfc_sock.c
+SOURCES_CXX += $(WFC_DIR)/LAN_Wfc.cpp
+DEFINES     += -DREBIT_WFC -DLIBSLIRP_STATIC_BUILD
+$(WFC_DIR)/LAN_Wfc.o: CXXFLAGS += -I$(SLIRP_DIR)/src
+
+$(SLIRP_SOURCES:.c=.o): CFLAGS += -I$(SLIRP_DIR)/glib -DBUILDING_LIBSLIRP -DG_LOG_DOMAIN=\"Slirp\" \
+                                  -DREBIT_WFC_REDIRECT -include $(WFC_DIR)/rebit_wfc_sock.h -w
+endif

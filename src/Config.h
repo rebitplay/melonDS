@@ -63,6 +63,7 @@ extern int DSiSDEnable;
 extern char DSiSDPath[1024];
 
 extern int RandomizeMAC;
+extern int RebitWfcOnline;
 extern int AudioBitrate;
 extern int AudioInterp;
 extern int ConsoleType;

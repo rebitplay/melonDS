@@ -156,6 +156,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled"
    },
    {
+      "melonds_wfc_online",
+      "Online (Nintendo WFC)",
+      NULL,
+      "Connects the DS to Kaeru WFC through the Rebit proxy. Requires a proxy URL from the frontend.",
+      NULL,
+      "system",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled"
+   },
+   {
       "melonds_dsi_sdcard",
       "Enable DSi SD Card",
       NULL,

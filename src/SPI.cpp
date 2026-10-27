@@ -26,6 +26,9 @@
 #include "DSi.h"
 #include "SPI.h"
 #include "DSi_SPI_TSC.h"
+#ifdef REBIT_WFC
+#include "WifiAP.h"
+#endif
 #include "Platform.h"
 
 
@@ -189,6 +192,45 @@ void LoadUserSettingsFromConfig() {
     Firmware[UserSettings+0x50] = messageLength;
 }
 
+#ifdef REBIT_WFC
+// Points WFC connection 1 at melonDS's virtual access point (DHCP, automatic
+// DNS) so games can go online through the Rebit proxy. The WFC user ID is kept.
+void ConfigureRebitWfcAccessPoint()
+{
+    u32 ap = 0x7FA00 & FirmwareMask;
+    u8* entry = &Firmware[ap];
+    const char* ssid = AP_NAME;
+    bool configured = entry[0xE7] == 0x00 && !strncmp((const char*)&entry[0x40], ssid, 32)
+        && !entry[0xC0] && !entry[0xC4] && !entry[0xC8] && !entry[0xD0] && entry[0xE6] == 0
+        && VerifyCRC16(0x0000, ap, 0xFE, ap + 0xFE);
+    if (!configured)
+    {
+        u8 wfcid[6];
+        memcpy(wfcid, &entry[0xF0], 6);
+        bool keepid = entry[0xE7] == 0x00;
+
+        memset(entry, 0, 0x100);
+        strncpy((char*)&entry[0x40], ssid, 32);
+        entry[0xE7] = 0x00; // status: normal
+        entry[0xEF] = 0x01; // connection configured
+        if (keepid) memcpy(&entry[0xF0], wfcid, 6);
+        *(u16*)&entry[0xFE] = CRC16(entry, 0xFE, 0x0000);
+    }
+
+    // Erased slots 2 and 3 fail their checksum; give them valid "not
+    // configured" entries like melonDS's generated firmware does.
+    for (u32 slot = ap + 0x100; slot <= ap + 0x200; slot += 0x100)
+    {
+        if (VerifyCRC16(0x0000, slot, 0xFE, slot + 0xFE))
+            continue;
+        memset(&Firmware[slot], 0, 0x100);
+        Firmware[slot + 0xE7] = 0xFF; // status: not configured
+        Firmware[slot + 0xEF] = 0x01;
+        *(u16*)&Firmware[slot + 0xFE] = CRC16(&Firmware[slot], 0xFE, 0x0000);
+    }
+}
+#endif
+
 void Reset()
 {
     if (Firmware) delete[] Firmware;
@@ -220,6 +262,11 @@ void Reset()
     }
 
     UserSettings = userdata;
+
+#ifdef REBIT_WFC
+    if (Config::RebitWfcOnline)
+        ConfigureRebitWfcAccessPoint();
+#endif
 
     if (!f || Config::FirmwareOverrideSettings)
         LoadUserSettingsFromConfig();
