@@ -24,6 +24,39 @@
 #include "screenlayout.h"
 #include "utils.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#include "rebit_mic.h"
+static RebitMicBuffer rebitMic;
+static unsigned int rebitMicSamples = 0;
+static unsigned int rebitMicNonzeroSamples = 0;
+static unsigned int rebitMicBlowFrames = 0;
+
+extern "C" EMSCRIPTEN_KEEPALIVE void rebit_mic_push(const int16_t* samples, int count)
+{
+   rebitMic.push(samples, count);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void rebit_mic_set_active(int on)
+{
+   rebitMic.set_active(on != 0);
+}
+
+// Cumulative delivery diagnostics, no recorded audio. Used by the browser proof.
+extern "C" EMSCRIPTEN_KEEPALIVE unsigned int rebit_mic_debug(int index)
+{
+   switch (index)
+   {
+      case 0: return rebitMicSamples;
+      case 1: return rebitMicNonzeroSamples;
+      case 2: return rebitMicBlowFrames;
+      case 3: return rebitMic.size();
+      case 4: return rebitMic.is_active();
+      default: return 0;
+   }
+}
+#endif
+
 char retro_base_directory[4096];
 static char retro_saves_directory[4096];
 
@@ -99,6 +132,9 @@ void retro_init(void)
 
 void retro_deinit(void)
 {
+#ifdef __EMSCRIPTEN__
+   rebit_mic_set_active(0);
+#endif
    libretro_supports_bitmasks = false;
    libretro_supports_option_categories = false;
 }
@@ -735,6 +771,11 @@ void retro_run(void)
 
    if (input_state.holding_noise_btn)
    {
+#ifdef __EMSCRIPTEN__
+      // Do not replay audio captured while the blow key was held.
+      rebitMic.clear();
+      rebitMicBlowFrames++;
+#endif
       if (micNoiseType)
          Mic_FeedNoise();
       else
@@ -744,6 +785,17 @@ void retro_run(void)
          NDS::MicInputFrame(tmp, 735);
       }
    }
+#ifdef __EMSCRIPTEN__
+   else if (rebitMic.is_active())
+   {
+      s16 tmp[RebitMicBuffer::FrameSamples];
+      int count = rebitMic.read_frame(tmp);
+      NDS::MicInputFrame(tmp, RebitMicBuffer::FrameSamples);
+      rebitMicSamples += count;
+      for (int i = 0; i < count; i++)
+         if (tmp[i] != 0) rebitMicNonzeroSamples++;
+   }
+#endif
    else
    {
       NDS::MicInputFrame(NULL, 0);
