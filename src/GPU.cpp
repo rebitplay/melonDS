@@ -30,6 +30,7 @@ namespace GPU
 #define HBLANK_CYCLES (48+(256*6))
 #define FRAME_CYCLES  (LINE_CYCLES * 263)
 
+bool SkipFrameDraw = false;
 u16 VCount;
 u32 NextVCount;
 u16 TotalScanlines;
@@ -1021,14 +1022,25 @@ void StartHBlank(u32 line)
     {
         // draw
         // note: this should start 48 cycles after the scanline start
+        // A hidden frame skips the pixel work unless display capture writes VRAM this frame.
+        const bool skipDraw = SkipFrameDraw && !GPU3D::CurrentRenderer->Accelerated
+            && !(GPU2D_A.CaptureCnt & (1u << 31)) && !GPU2D_A.CaptureLatch;
         if (line < 192)
         {
-            GPU2D_Renderer->DrawScanline(line, &GPU2D_A);
-            GPU2D_Renderer->DrawScanline(line, &GPU2D_B);
+            if (skipDraw)
+            {
+                GPU2D_Renderer->SkipScanline(line, &GPU2D_A);
+                GPU2D_Renderer->SkipScanline(line, &GPU2D_B);
+            }
+            else
+            {
+                GPU2D_Renderer->DrawScanline(line, &GPU2D_A);
+                GPU2D_Renderer->DrawScanline(line, &GPU2D_B);
+            }
         }
 
         // sprites are pre-rendered one scanline in advance
-        if (line < 191)
+        if (line < 191 && !skipDraw)
         {
             GPU2D_Renderer->DrawSprites(line+1, &GPU2D_A);
             GPU2D_Renderer->DrawSprites(line+1, &GPU2D_B);

@@ -27,6 +27,7 @@ class SoftRenderer : public Renderer2D
 {
 public:
     SoftRenderer();
+    void SkipScanline(u32 line, Unit* unit) override;
     ~SoftRenderer() override {}
 
     void DrawScanline(u32 line, Unit* unit) override;

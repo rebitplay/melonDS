@@ -805,9 +805,15 @@ void retro_run(void)
       NDS::MicInputFrame(NULL, 0);
    }
 
+   // A frame the frontend will not show (fast-forward) skips the renderers' pixel work.
+   int av_enable = 3;
+   bool show_video = !environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &av_enable) || (av_enable & 1);
+   GPU::SkipFrameDraw = !show_video;
+
    if (current_renderer != CurrentRenderer::None) NDS::RunFrame();
 
-   render_frame();
+   GPU::SkipFrameDraw = false;
+   if (show_video || current_renderer == CurrentRenderer::None) render_frame();
 
    audio_callback();
 

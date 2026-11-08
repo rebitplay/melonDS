@@ -124,6 +124,9 @@ public:
     virtual ~Renderer2D() {}
 
     virtual void DrawScanline(u32 line, Unit* unit) = 0;
+    // A scanline of a frame nobody sees: emulated state advances as DrawScanline's would,
+    // without the pixel work. Renderers without a cheaper path draw it.
+    virtual void SkipScanline(u32 line, Unit* unit) { DrawScanline(line, unit); }
     virtual void DrawSprites(u32 line, Unit* unit) = 0;
 
     virtual void VBlankEnd(Unit* unitA, Unit* unitB) = 0;

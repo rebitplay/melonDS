@@ -168,6 +168,37 @@ u32 SoftRenderer::ColorComposite(int i, u32 val1, u32 val2)
     return val1;
 }
 
+// What DrawScanline changes in emulated state, without drawing: the affine/extended/large
+// background reference points advance for every such layer DrawScanline would draw, then the
+// mosaic counters. (Callers never skip a frame with display capture, which writes VRAM.)
+void SoftRenderer::SkipScanline(u32 line, Unit* unit)
+{
+    CurUnit = unit;
+    line = GPU::VCount;
+    if (line > 192 || (unit->Num && !unit->Enabled)) return;  // forced blank: DrawScanline stops here
+
+    const u32 dispCnt = unit->DispCnt;
+    if (!(dispCnt & (1 << 7)))
+    {
+        const u32 bgmode = dispCnt & 0x7;
+        auto advance = [unit](int ref)
+        {
+            unit->BGXRefInternal[ref] += unit->BGRotB[ref];
+            unit->BGYRefInternal[ref] += unit->BGRotD[ref];
+        };
+        if (bgmode <= 5)
+        {
+            if ((dispCnt & 0x0800) && bgmode >= 1) advance(1);                          // BG3 affine/extended
+            if ((dispCnt & 0x0400) && (bgmode == 2 || bgmode == 4 || bgmode == 5)) advance(0); // BG2
+        }
+        else if (bgmode == 6)
+        {
+            if (dispCnt & 0x0400) advance(0);                                           // BG2 large
+        }
+    }
+    unit->UpdateMosaicCounters(line);
+}
+
 void SoftRenderer::DrawScanline(u32 line, Unit* unit)
 {
     CurUnit = unit;

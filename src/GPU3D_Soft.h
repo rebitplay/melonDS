@@ -502,6 +502,9 @@ private:
     bool Enabled;
 
     bool FrameIdentical;
+    // Rasterize on the first GetLine, not at VCount 215: a frame nobody draws (fast-forward)
+    // costs no rasterization. Its inputs (Render* state, flattened textures) hold until VCount 192.
+    bool RenderPending = false;
 
     // threading
 

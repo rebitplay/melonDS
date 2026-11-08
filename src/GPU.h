@@ -39,6 +39,9 @@ namespace GPU
 {
 
 extern u16 VCount;
+// Set by the frontend for a frame that will not be shown (fast-forward). The software
+// renderers then skip their pixel work; emulated state advances exactly as when drawing.
+extern bool SkipFrameDraw;
 extern u16 TotalScanlines;
 
 extern u16 DispStat[2];

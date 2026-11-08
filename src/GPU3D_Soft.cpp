@@ -107,6 +107,7 @@ void SoftRenderer::Reset()
     memset(AttrBuffer, 0, BufferSize * 2 * 4);
 
     PrevIsShadowMask = false;
+    RenderPending = false;
 
     SetupRenderThread();
 }
@@ -1657,7 +1658,8 @@ void SoftRenderer::RenderFrame()
     bool textureChanged = GPU::MakeVRAMFlat_TextureCoherent(textureDirty);
     bool texPalChanged = GPU::MakeVRAMFlat_TexPalCoherent(texPalDirty);
 
-    FrameIdentical = !(textureChanged || texPalChanged) && RenderFrameIdentical;
+    // a previous frame that was never rasterized left the buffers stale
+    FrameIdentical = !(textureChanged || texPalChanged) && RenderFrameIdentical && !RenderPending;
 
     if (RenderThreadRunning.load(std::memory_order_relaxed))
     {
@@ -1665,8 +1667,7 @@ void SoftRenderer::RenderFrame()
     }
     else if (!FrameIdentical)
     {
-        ClearBuffers();
-        RenderPolygons(false, &RenderPolygonRAM[0], RenderNumPolygons);
+        RenderPending = true;
     }
 }
 
@@ -1704,6 +1705,12 @@ u32* SoftRenderer::GetLine(int line)
     {
         if (line < 192)
             Platform::Semaphore_Wait(Sema_ScanlineCount);
+    }
+    else if (RenderPending)
+    {
+        RenderPending = false;
+        ClearBuffers();
+        RenderPolygons(false, &RenderPolygonRAM[0], RenderNumPolygons);
     }
 
     return &ColorBuffer[(line * ScanlineWidth) + FirstPixelOffset];
