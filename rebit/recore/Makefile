@@ -21,7 +21,7 @@ CORE_SOURCES := \
 	GPU.cpp GPU_Soft.cpp GPU2D.cpp GPU2D_Soft.cpp GPU3D.cpp GPU3D_Soft.cpp GPU3D_Texcache.cpp Mic.cpp \
 	NDS.cpp NDSCart.cpp ROMList.cpp FreeBIOS.cpp RTC.cpp Savestate.cpp SPI.cpp SPI_Firmware.cpp SPU.cpp \
 	Utils.cpp Wifi.cpp WifiAP.cpp \
-	ARMJIT.cpp ARMJIT_Memory.cpp ARM_InstrInfo.cpp ARMJIT_WASM/ARMJIT_Compiler.cpp \
+	ARMJIT.cpp ARMJIT_Memory.cpp ARM_InstrInfo.cpp ARMJIT_WASM/ARMJIT_Compiler.cpp ARMJIT_WASM/ARMJIT_ALU.cpp \
 	DSP_HLE/UcodeBase.cpp DSP_HLE/AACUcode.cpp DSP_HLE/G711Ucode.cpp DSP_HLE/GraphicsUcode.cpp \
 	NDSCart/CartCommon.cpp NDSCart/CartRetail.cpp NDSCart/CartRetailNAND.cpp NDSCart/CartRetailIR.cpp \
 	NDSCart/CartRetailBT.cpp NDSCart/CartSD.cpp NDSCart/CartHomebrew.cpp NDSCart/CartR4.cpp \

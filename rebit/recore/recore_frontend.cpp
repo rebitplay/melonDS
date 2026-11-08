@@ -34,6 +34,7 @@
 #define EMSCRIPTEN_KEEPALIVE
 #endif
 
+namespace melonDS { extern u32 RebitJitNativeMask; } // diagnostics, ARMJIT_WASM
 using namespace melonDS;
 
 namespace
@@ -128,6 +129,8 @@ void ReadVariables()
         jitBranchOptimizations = strcmp(value, "disabled") != 0;
     if (const char* value = GetVariable("melonds_jit_literal"))
         jitLiteralOptimizations = strcmp(value, "disabled") != 0;
+    if (const char* value = GetVariable("melonds_jit_native"))
+        melonDS::RebitJitNativeMask = strtoul(value, nullptr, 0);
     if (const char* value = GetVariable("melonds_jit_block_size"))
         jitMaxBlockSize = atoi(value) > 0 ? atoi(value) : 32;
 }
@@ -353,6 +356,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
         {"melonds_jit_branch", "JIT branch following (diagnostics); enabled|disabled"},
         {"melonds_jit_literal", "JIT literal optimisation (diagnostics); enabled|disabled"},
         {"melonds_jit_block_size", "JIT maximum block size (diagnostics); 32|1|2|4|8|16"},
+        {"melonds_jit_native", "JIT native groups (diagnostics: 1 ARM ALU, 2 ARM branch, 4 Thumb ALU, 8 Thumb branch, 0x10000 idle loops); 0xffffffff|0|0x1|0x2|0x3|0x4|0x5|0x6|0x7|0x8|0x9|0xa|0xb|0xc|0xd|0xe|0xf|0x10000|0x10001|0x10002|0x10003|0x10004|0x10005|0x10006|0x10007|0x10008|0x10009|0x1000a|0x1000b|0x1000c|0x1000d|0x1000e|0x1000f"},
         {"melonds_opengl_renderer", "OpenGL renderer (not yet in the 1.x core); disabled"},
         {"melonds_wfc_online", "Nintendo WFC online (not yet in the 1.x core); disabled"},
         {nullptr, nullptr},
