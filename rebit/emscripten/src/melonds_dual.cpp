@@ -145,6 +145,15 @@ struct Runtime
     // md_load_staged().
     std::array<std::unique_ptr<std::uint8_t[]>, MaximumPlayers> stagedRoms {};
     std::array<std::uint32_t, MaximumPlayers> stagedRomLengths {};
+    // Seats staged with no cartridge (md_stage_download_play): their console
+    // boots the DS menu from the real BIOS and firmware, for DS Download Play.
+    std::array<bool, MaximumPlayers> stagedDownloadPlay {};
+    // The DS nickname a cartridge-less seat's firmware shows (UTF-16, up to 10).
+    std::array<std::u16string, MaximumPlayers> stagedNicknames {};
+    // Real BIOS and firmware for md_load_staged (md_stage_system_file).
+    std::vector<std::uint8_t> stagedBios7;
+    std::vector<std::uint8_t> stagedBios9;
+    std::vector<std::uint8_t> stagedFirmware;
 #ifdef REBIT_MELONDS_DUAL_COOPERATIVE
     std::uint64_t cooperativeSlices = 0;
     // A single-console Download Play runtime can reach a LocalMP receive
@@ -901,6 +910,20 @@ std::unique_ptr<melonDS::NDS> CreateConsole(
         static_cast<std::uint8_t>((seed >> 16) + slot.context.id * 0x10),
     };
     header.UpdateChecksum();
+    if (slot.context.id >= 0 && slot.context.id < MaximumPlayers
+        && !State.stagedNicknames[slot.context.id].empty())
+    {
+        // The player's own name on their DS (both firmware user-setting copies).
+        const auto& nickname = State.stagedNicknames[slot.context.id];
+        for (auto& user : firmware.GetUserData())
+        {
+            std::fill(std::begin(user.Nickname), std::end(user.Nickname), u'\0');
+            const std::size_t length = std::min<std::size_t>(nickname.size(), 10);
+            std::copy_n(nickname.data(), length, user.Nickname);
+            user.NameLength = static_cast<melonDS::u16>(length);
+            user.UpdateChecksum();
+        }
+    }
     firmware.UpdateChecksums();
 
     melonDS::NDSArgs arguments;
@@ -958,6 +981,14 @@ void ClearStagedRoms() noexcept
     for (auto& rom : State.stagedRoms)
         rom.reset();
     State.stagedRomLengths.fill(0);
+    State.stagedDownloadPlay.fill(false);
+    for (auto& nickname : State.stagedNicknames) nickname.clear();
+    State.stagedBios7.clear();
+    State.stagedBios7.shrink_to_fit();
+    State.stagedBios9.clear();
+    State.stagedBios9.shrink_to_fit();
+    State.stagedFirmware.clear();
+    State.stagedFirmware.shrink_to_fit();
 }
 
 Slot* GetSlot(int player) noexcept
@@ -1363,6 +1394,54 @@ REBIT_EXPORT std::uint8_t* md_stage_rom(int player, std::uint32_t length)
     return State.stagedRoms[player].get();
 }
 
+// A seat with no cartridge: its console boots the DS menu (real BIOS and
+// firmware from md_stage_system_file are then required), where the player
+// picks DS Download Play and receives the game from another seat's console.
+REBIT_EXPORT int md_stage_download_play(int player)
+{
+    using namespace rebit;
+    if (player <= 0 || player >= MaximumPlayers)
+    {
+        State.error = "Only a guest seat can boot without a cartridge.";
+        return 0;
+    }
+    State.stagedRoms[player].reset();
+    State.stagedRomLengths[player] = 0;
+    State.stagedDownloadPlay[player] = true;
+    return 1;
+}
+
+// The DS nickname (UTF-16 code units, up to 10) a seat's console shows.
+REBIT_EXPORT int md_stage_nickname(int player, const std::uint16_t* units, std::uint32_t count)
+{
+    using namespace rebit;
+    if (player < 0 || player >= MaximumPlayers || !units || count == 0)
+        return 0;
+    State.stagedNicknames[player].assign(units, units + std::min<std::uint32_t>(count, 10));
+    return 1;
+}
+
+// kind 7: ARM7 BIOS, 9: ARM9 BIOS, 0: firmware. Returns a core-owned buffer of
+// `length` bytes for the caller to fill, consumed by md_load_staged().
+REBIT_EXPORT std::uint8_t* md_stage_system_file(int kind, std::uint32_t length)
+{
+    using namespace rebit;
+    std::vector<std::uint8_t>* target = kind == 7 ? &State.stagedBios7
+        : kind == 9 ? &State.stagedBios9
+        : kind == 0 ? &State.stagedFirmware
+        : nullptr;
+    const bool sized = kind == 7 ? length == melonDS::ARM7BIOSSize
+        : kind == 9 ? length == melonDS::ARM9BIOSSize
+        : length >= 0x20000 && length <= 0x80000;
+    if (!target || !sized)
+    {
+        State.error = "Nintendo DS BIOS or firmware size is invalid.";
+        return nullptr;
+    }
+    target->assign(length, 0);
+    return target->data();
+}
+
 // Replicated Local Wireless where every seat may run its own cartridge, such
 // as Pokemon Diamond beside Pearl. A seat without a staged ROM runs a copy of
 // seat 0's. Staged buffers are always consumed, even when loading fails.
@@ -1379,7 +1458,28 @@ REBIT_EXPORT int md_load_staged(int players, std::uint32_t seedLow, std::uint32_
         roms[player] = std::move(State.stagedRoms[player]);
         lengths[player] = State.stagedRomLengths[player];
     }
+    const auto downloadPlay = State.stagedDownloadPlay;
+    auto nicknames = State.stagedNicknames;
+    const std::vector<std::uint8_t> bios7 = std::move(State.stagedBios7);
+    const std::vector<std::uint8_t> bios9 = std::move(State.stagedBios9);
+    const std::vector<std::uint8_t> firmware = std::move(State.stagedFirmware);
     ClearStagedRoms();
+    // CreateConsole reads them for cartridge-less seats; cleared again below.
+    State.stagedNicknames = std::move(nicknames);
+    const bool systemFiles = !bios7.empty() && !bios9.empty() && !firmware.empty();
+    // Only cartridge-less seats boot the real BIOS and firmware (the DS menu).
+    // Cartridge seats keep melonDS's free BIOS and generated firmware, so a
+    // game never sees another console's saved Wi-Fi settings.
+    const FirmwareAssets assets = systemFiles
+        ? FirmwareAssets {
+              .bios7 = bios7.data(),
+              .bios7Length = static_cast<std::uint32_t>(bios7.size()),
+              .bios9 = bios9.data(),
+              .bios9Length = static_cast<std::uint32_t>(bios9.size()),
+              .firmware = firmware.data(),
+              .firmwareLength = static_cast<std::uint32_t>(firmware.size()),
+          }
+        : FirmwareAssets {};
 
     if (players < MinimumPlayers || players > MaximumPlayers)
     {
@@ -1393,9 +1493,17 @@ REBIT_EXPORT int md_load_staged(int players, std::uint32_t seedLow, std::uint32_
     }
     for (int player = players; player < MaximumPlayers; ++player)
     {
-        if (roms[player])
+        if (roms[player] || downloadPlay[player])
         {
-            State.error = "A Nintendo DS ROM was staged for a seat outside the room.";
+            State.error = "A Nintendo DS seat was staged outside the room.";
+            return 0;
+        }
+    }
+    for (int player = 0; player < players; ++player)
+    {
+        if (downloadPlay[player] && !systemFiles)
+        {
+            State.error = "DS Download Play needs the Nintendo DS BIOS and firmware.";
             return 0;
         }
     }
@@ -1411,13 +1519,15 @@ REBIT_EXPORT int md_load_staged(int players, std::uint32_t seedLow, std::uint32_
             auto slot = std::make_unique<Slot>();
             slot->context.id = player;
             const int source = roms[player] ? player : 0;
-            slot->console = CreateConsole(
-                roms[source].get(),
-                lengths[source],
-                *slot,
-                seed,
-                REBIT_MELONDS_DUAL_BOOT_REPLICATED,
-                FirmwareAssets {});
+            slot->console = downloadPlay[player]
+                ? CreateConsole(nullptr, 0, *slot, seed, REBIT_MELONDS_DUAL_BOOT_DOWNLOAD_PLAY_CLIENT, assets)
+                : CreateConsole(
+                      roms[source].get(),
+                      lengths[source],
+                      *slot,
+                      seed,
+                      REBIT_MELONDS_DUAL_BOOT_REPLICATED,
+                      FirmwareAssets {});
             // The cartridge keeps its own copy. Release each staged ROM as
             // soon as possible so two large games never sit in the heap twice.
             if (source != 0)
@@ -1433,6 +1543,7 @@ REBIT_EXPORT int md_load_staged(int players, std::uint32_t seedLow, std::uint32_
             State.slots.push_back(std::move(slot));
         }
         roms[0].reset();
+        for (auto& nickname : State.stagedNicknames) nickname.clear();
 
 #ifndef REBIT_MELONDS_DUAL_COOPERATIVE
         for (auto& slot : State.slots)

@@ -177,17 +177,17 @@ set_property(TARGET ${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PROPERTY CXX_STANDARD 2
 if(REBIT_MELONDS_DUAL_COOPERATIVE)
     target_compile_definitions(core PUBLIC REBIT_MELONDS_DUAL_COOPERATIVE=1)
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-        REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-dual-cooperative-4"
+        REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-dual-cooperative-5"
         REBIT_MELONDS_DUAL_COOPERATIVE=1
     )
     if(REBIT_MELONDS_STREAM_THREADED_RENDERER)
         target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-            REBIT_MELONDS_DUAL_BUILD="melonds-dual-stream-mt-1"
+            REBIT_MELONDS_DUAL_BUILD="melonds-dual-stream-mt-2"
             REBIT_MELONDS_STREAM_THREADED_RENDERER=1
         )
     else()
         target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-            REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-6"
+            REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-7"
         )
     endif()
 elseif(REBIT_MELONDS_ROLLBACK)

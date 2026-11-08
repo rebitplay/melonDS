@@ -49,6 +49,12 @@ int md_load_with_profile(
  * and always releases the staged buffers. */
 uint8_t* md_stage_rom(int player, uint32_t length);
 int md_load_staged(int players, uint32_t seed_low, uint32_t seed_high);
+/* A guest seat with no cartridge boots the DS menu for DS Download Play; it needs the real
+ * BIOS and firmware, staged with md_stage_system_file (kind 7, 9 or 0 for the firmware). */
+int md_stage_download_play(int player);
+uint8_t* md_stage_system_file(int kind, uint32_t length);
+/* The DS nickname (UTF-16 code units, up to 10) a seat's console shows, staged before md_load_staged. */
+int md_stage_nickname(int player, const uint16_t* units, uint32_t count);
 int md_boot_profile(void);
 void md_destroy(void);
 int md_is_loaded(void);
