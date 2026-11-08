@@ -136,8 +136,10 @@ private:
 
                 // this seems to be a proper division on hardware :/
                 // I haven't been able to find cases that produce imperfect output
+                // |num| < 2^53, so a double divide truncates to exactly the integer quotient,
+                // and it is several times cheaper than a 64-bit integer divide in WebAssembly
                 if (den == 0) yfactor = 0;
-                else          yfactor = (s32)(num / den);
+                else          yfactor = (s32)((double)num / (double)den);
             }
         }
 
