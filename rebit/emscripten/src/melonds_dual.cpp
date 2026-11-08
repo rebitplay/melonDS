@@ -130,6 +130,8 @@ struct Runtime
     std::atomic<int> multiplayerTurn {-1};
     std::atomic<std::uint32_t> multiplayerProgressSequence {0};
     int visiblePlayer = 0;
+    // Stream host: every seat renders and mixes audio (md_set_stream_all).
+    bool streamAll = false;
 #ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
     bool renderAll = false;
 #endif
@@ -163,6 +165,7 @@ bool OutputEnabledFor(int player)
 #ifdef REBIT_MELONDS_DETERMINISTIC
     return true;
 #endif
+    if (State.streamAll) return true;
 #ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
     if (State.renderAll) return true;
 #endif
@@ -174,7 +177,7 @@ bool AudioOutputEnabledFor(int player)
 #ifdef REBIT_MELONDS_DETERMINISTIC
     return true;
 #else
-    return player == State.visiblePlayer;
+    return State.streamAll || player == State.visiblePlayer;
 #endif
 }
 
@@ -817,6 +820,7 @@ void StopRuntime()
         State.externalPackets.clear();
     }
     State.visiblePlayer = 0;
+    State.streamAll = false;
 #ifdef REBIT_MELONDS_ROLLBACK_PLAYGROUND
     State.renderAll = false;
 #endif
@@ -932,7 +936,9 @@ std::unique_ptr<melonDS::NDS> CreateConsole(
 
     melonDS::RendererSettings rendererSettings {
         .ScaleFactor = 1,
-#if defined(REBIT_MELONDS_DUAL_COOPERATIVE) || (defined(REBIT_MELONDS_DETERMINISTIC) && !defined(REBIT_MELONDS_DETERMINISTIC_THREADED_RENDERER))
+#if defined(REBIT_MELONDS_STREAM_THREADED_RENDERER)
+        .Threaded = true,
+#elif defined(REBIT_MELONDS_DUAL_COOPERATIVE) || (defined(REBIT_MELONDS_DETERMINISTIC) && !defined(REBIT_MELONDS_DETERMINISTIC_THREADED_RENDERER))
         .Threaded = false,
 #else
         .Threaded = true,
@@ -1498,6 +1504,30 @@ REBIT_EXPORT int md_visible_player()
     return rebit::State.visiblePlayer;
 }
 
+#if defined(REBIT_MELONDS_DUAL_COOPERATIVE) && !defined(REBIT_MELONDS_DETERMINISTIC)
+// Stream host: 1 renders every seat's screens and mixes every seat's audio, for
+// per-seat md_framebuffer() and md_audio_read_player(); 0 returns to the visible
+// player only. Emulated state does not depend on it. Reset by every load.
+REBIT_EXPORT int md_set_stream_all(int enabled)
+{
+    if (enabled != 0 && enabled != 1) return 0;
+    rebit::State.streamAll = enabled != 0;
+    for (const auto& slot : rebit::State.slots)
+    {
+        slot->console->GetRenderer().SetOutputEnabled(rebit::OutputEnabledFor(slot->context.id));
+        slot->console->SPU.SetOutputEnabled(rebit::AudioOutputEnabledFor(slot->context.id));
+    }
+    return 1;
+}
+
+// 1 when the last frame produced a new picture for this seat.
+REBIT_EXPORT int md_frame_drawn_player(int player)
+{
+    auto* slot = rebit::GetSlot(player);
+    return slot && slot->console->GetRenderer().LastFrameDrawn() ? 1 : 0;
+}
+#endif
+
 // Host presentation pacing. While set, upcoming frames produce no pixels
 // (unless DS display capture needs them); CPU, GPU command processing, audio,
 // timing and all serialized guest state advance exactly as when rendering.
@@ -1797,6 +1827,21 @@ REBIT_EXPORT int md_audio_read_player(int player, int maximumFrames)
     std::copy_n(slot->frameAudio.data() + slot->frameAudioRead * 2, count * 2, rebit::State.audio.data());
     slot->frameAudioRead += count;
     return count;
+}
+#elif defined(REBIT_MELONDS_DUAL_COOPERATIVE)
+// Per-seat audio for a stream host (md_set_stream_all): read into md_audio_buffer().
+REBIT_EXPORT int md_audio_available_player(int player)
+{
+    auto* slot = rebit::GetSlot(player);
+    return slot && slot->console ? slot->console->SPU.GetOutputSize() : 0;
+}
+
+REBIT_EXPORT int md_audio_read_player(int player, int maximumFrames)
+{
+    auto* slot = rebit::GetSlot(player);
+    if (!slot || !slot->console) return 0;
+    const int requested = std::clamp(maximumFrames, 0, rebit::AudioScratchFrames);
+    return slot->console->SPU.ReadOutput(rebit::State.audio.data(), requested);
 }
 #endif
 

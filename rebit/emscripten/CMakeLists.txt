@@ -15,6 +15,7 @@ option(REBIT_MELONDS_ADAPTIVE_WAIT "Experiment: bound WASM radio-turn spinning b
 option(REBIT_MELONDS_REUSE_RASTER "Experiment: reuse identical raster output without serializing cache decisions" OFF)
 option(REBIT_MELONDS_LATE_PERSPECTIVE "Experiment: defer Z-buffer perspective division until depth passes" OFF)
 option(REBIT_MELONDS_INDIRECT_DISPATCH "Experiment: use table-based ARM/Thumb dispatch in cooperative WASM" OFF)
+option(REBIT_MELONDS_STREAM_THREADED_RENDERER "Stream host: cooperative runtime with each console's software 3D rasterizer on its own thread (needs cross-origin isolation)" OFF)
 option(REBIT_MELONDS_SIMD_ATTRIBUTES "Experiment: interpolate four raster attributes with WASM SIMD" OFF)
 # Released in melonds-dual-cooperative-4: both default ON for the cooperative
 # WASM profile and remain unavailable elsewhere.
@@ -176,10 +177,19 @@ set_property(TARGET ${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PROPERTY CXX_STANDARD 2
 if(REBIT_MELONDS_DUAL_COOPERATIVE)
     target_compile_definitions(core PUBLIC REBIT_MELONDS_DUAL_COOPERATIVE=1)
     target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
-        REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-5"
-        REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-dual-cooperative-3"
+        REBIT_MELONDS_DUAL_RUNTIME_ABI="rebit-melonds-dual-cooperative-4"
         REBIT_MELONDS_DUAL_COOPERATIVE=1
     )
+    if(REBIT_MELONDS_STREAM_THREADED_RENDERER)
+        target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
+            REBIT_MELONDS_DUAL_BUILD="melonds-dual-stream-mt-1"
+            REBIT_MELONDS_STREAM_THREADED_RENDERER=1
+        )
+    else()
+        target_compile_definitions(${REBIT_MELONDS_DUAL_RUNTIME_TARGET} PRIVATE
+            REBIT_MELONDS_DUAL_BUILD="melonds-dual-cooperative-6"
+        )
+    endif()
 elseif(REBIT_MELONDS_ROLLBACK)
     if(REBIT_MELONDS_DETERMINISTIC)
         set(REBIT_ROLLBACK_BUILD "melonds-dual-deterministic-1")
@@ -241,7 +251,7 @@ if(EMSCRIPTEN)
     target_compile_options(teakra PUBLIC "-flto")
     target_compile_options(melonds_dual PRIVATE "-flto")
 
-    if(NOT REBIT_MELONDS_DUAL_COOPERATIVE)
+    if(NOT REBIT_MELONDS_DUAL_COOPERATIVE OR REBIT_MELONDS_STREAM_THREADED_RENDERER)
         target_compile_options(core PUBLIC "-pthread")
         target_compile_options(teakra PUBLIC "-pthread")
         target_compile_options(melonds_dual PRIVATE "-pthread")
@@ -270,6 +280,10 @@ if(EMSCRIPTEN)
             "-sINITIAL_MEMORY=134217728"
             "-sMAXIMUM_MEMORY=1073741824"
         )
+        if(REBIT_MELONDS_STREAM_THREADED_RENDERER)
+            # One software 3D renderer thread per console, up to four seats.
+            target_link_options(melonds_dual PRIVATE "-pthread" "-sPTHREAD_POOL_SIZE=4")
+        endif()
     else()
         target_link_options(melonds_dual PRIVATE
             "-sALLOW_MEMORY_GROWTH=0"
