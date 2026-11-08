@@ -366,7 +366,8 @@ bool IsIdleLoop(bool thumb, FetchedInstr* instrs, int instrsCount)
     for (int i = 0; i < instrsCount; i++)
     {
         JIT_DEBUGPRINT("instr %d %08x regs(%x %x) %x %x\n", i, instrs[i].Instr, instrs[i].Info.DstRegs, instrs[i].Info.SrcRegs, regsWrittenTo, regsDisallowedToWrite);
-        if (instrs[i].Info.SpecialKind == ARMInstrInfo::special_WriteMem)
+        if (instrs[i].Info.SpecialKind == ARMInstrInfo::special_WriteMem
+            || instrs[i].Info.SpecialKind == ARMInstrInfo::special_LoadMem)
             return false;
         if (!thumb && instrs[i].Info.Kind >= ARMInstrInfo::ak_MSR_IMM && instrs[i].Info.Kind <= ARMInstrInfo::ak_MRC)
             return false;

@@ -539,7 +539,14 @@ Compiler::CompileFunc Compiler::GetCompileFunc() const
     if (!func)
         return nullptr;
     u32 group;
-    if (Thumb)
+    if (func == &Compiler::A_Comp_BranchXchangeReg || func == &Compiler::T_Comp_BranchXchangeReg)
+        group = 32;
+    else if (func == &Compiler::A_Comp_MemWB || func == &Compiler::A_Comp_MemHalf || func == &Compiler::A_Comp_LDM_STM
+        || func == &Compiler::T_Comp_MemReg || func == &Compiler::T_Comp_MemImm || func == &Compiler::T_Comp_MemRegHalf
+        || func == &Compiler::T_Comp_MemImmHalf || func == &Compiler::T_Comp_LoadPCRel || func == &Compiler::T_Comp_MemSPRel
+        || func == &Compiler::T_Comp_PUSH_POP || func == &Compiler::T_Comp_LDMIA_STMIA)
+        group = 16;
+    else if (Thumb)
         group = (func == &Compiler::T_Comp_BCOND || func == &Compiler::T_Comp_B || func == &Compiler::T_Comp_BL_Merged) ? 8 : 4;
     else
         group = func == &Compiler::A_Comp_BranchImm ? 2 : 1;
@@ -586,6 +593,29 @@ Compiler::CompileFunc Compiler::GetCompileFuncUnmasked() const
             return &Compiler::T_Comp_RelAddr;
         case ARMInstrInfo::tk_ADD_SP:
             return &Compiler::T_Comp_AddSP;
+        case ARMInstrInfo::tk_LDR_PCREL:
+            return &Compiler::T_Comp_LoadPCRel;
+        case ARMInstrInfo::tk_STR_REG: case ARMInstrInfo::tk_STRB_REG:
+        case ARMInstrInfo::tk_LDR_REG: case ARMInstrInfo::tk_LDRB_REG:
+            return &Compiler::T_Comp_MemReg;
+        case ARMInstrInfo::tk_STRH_REG: case ARMInstrInfo::tk_LDRSB_REG:
+        case ARMInstrInfo::tk_LDRH_REG: case ARMInstrInfo::tk_LDRSH_REG:
+            return &Compiler::T_Comp_MemRegHalf;
+        case ARMInstrInfo::tk_STR_IMM: case ARMInstrInfo::tk_LDR_IMM:
+        case ARMInstrInfo::tk_STRB_IMM: case ARMInstrInfo::tk_LDRB_IMM:
+            return &Compiler::T_Comp_MemImm;
+        case ARMInstrInfo::tk_STRH_IMM: case ARMInstrInfo::tk_LDRH_IMM:
+            return &Compiler::T_Comp_MemImmHalf;
+        case ARMInstrInfo::tk_STR_SPREL: case ARMInstrInfo::tk_LDR_SPREL:
+            return &Compiler::T_Comp_MemSPRel;
+        case ARMInstrInfo::tk_PUSH: case ARMInstrInfo::tk_POP:
+            return &Compiler::T_Comp_PUSH_POP;
+        case ARMInstrInfo::tk_LDMIA: case ARMInstrInfo::tk_STMIA:
+            return &Compiler::T_Comp_LDMIA_STMIA;
+        case ARMInstrInfo::tk_BX:
+            return &Compiler::T_Comp_BranchXchangeReg;
+        case ARMInstrInfo::tk_BLX_REG:
+            return Num == 0 ? &Compiler::T_Comp_BranchXchangeReg : nullptr;
         case ARMInstrInfo::tk_BCOND:
             return &Compiler::T_Comp_BCOND;
         case ARMInstrInfo::tk_B:
@@ -604,10 +634,39 @@ Compiler::CompileFunc Compiler::GetCompileFuncUnmasked() const
             return nullptr; // writes the PC
         return &Compiler::A_Comp_ALU;
     }
+    const u32 instr = CurInstr.Instr;
+    const u32 rd = (instr >> 12) & 0xF;
+    const u32 rn = (instr >> 16) & 0xF;
+    const bool unconditional = CurInstr.Cond() == 0xE;
+    if (kind >= ARMInstrInfo::ak_STR_REG_LSL && kind <= ARMInstrInfo::ak_LDRB_POST_IMM)
+    {
+        // the PC as data or base with writeback stays with the interpreter
+        if (rd == 15 || (rn == 15 && (!(instr & (1 << 24)) || (instr & (1 << 21)))))
+            return nullptr;
+        return &Compiler::A_Comp_MemWB;
+    }
+    if ((kind >= ARMInstrInfo::ak_STRH_REG && kind <= ARMInstrInfo::ak_STRH_POST_IMM)
+        || (kind >= ARMInstrInfo::ak_LDRH_REG && kind <= ARMInstrInfo::ak_LDRSH_POST_IMM))
+    {
+        if (rd == 15 || (rn == 15 && (!(instr & (1 << 24)) || (instr & (1 << 21)))))
+            return nullptr;
+        return &Compiler::A_Comp_MemHalf;
+    }
     switch (kind)
     {
     case ARMInstrInfo::ak_B: case ARMInstrInfo::ak_BL: case ARMInstrInfo::ak_BLX_IMM:
         return &Compiler::A_Comp_BranchImm;
+    case ARMInstrInfo::ak_LDM: case ARMInstrInfo::ak_STM:
+    {
+        const bool load = instr & (1 << 20);
+        if (rn == 15 || (instr & (1 << 22)))
+            return nullptr; // user mode registers, or the PC as base
+        if ((instr & (1 << 15)) && (!load || !unconditional))
+            return nullptr; // storing the PC; a conditional jump through it
+        return &Compiler::A_Comp_LDM_STM;
+    }
+    case ARMInstrInfo::ak_BX: case ARMInstrInfo::ak_BLX_REG:
+        return unconditional ? &Compiler::A_Comp_BranchXchangeReg : nullptr;
     default:
         return nullptr;
     }
@@ -622,11 +681,14 @@ bool Compiler::CanCompile(bool thumb, u16 kind) const
     {
         if (kind == ARMInstrInfo::tk_MUL_REG)
             return false;
-        return kind <= ARMInstrInfo::tk_ADD_SP || kind == ARMInstrInfo::tk_BCOND
-            || kind == ARMInstrInfo::tk_B || kind == ARMInstrInfo::tk_BL_LONG;
+        return kind <= ARMInstrInfo::tk_BLX_REG || kind == ARMInstrInfo::tk_B || kind == ARMInstrInfo::tk_BL_LONG;
     }
-    return kind <= ARMInstrInfo::ak_CMN_IMM || kind == ARMInstrInfo::ak_B || kind == ARMInstrInfo::ak_BL
-        || kind == ARMInstrInfo::ak_BLX_IMM;
+    return kind <= ARMInstrInfo::ak_CMN_IMM
+        || (kind >= ARMInstrInfo::ak_STR_REG_LSL && kind <= ARMInstrInfo::ak_STRH_POST_IMM)
+        || (kind >= ARMInstrInfo::ak_LDRH_REG && kind <= ARMInstrInfo::ak_LDRSH_POST_IMM)
+        || kind == ARMInstrInfo::ak_LDM || kind == ARMInstrInfo::ak_STM
+        || kind == ARMInstrInfo::ak_B || kind == ARMInstrInfo::ak_BL || kind == ARMInstrInfo::ak_BLX_IMM
+        || kind == ARMInstrInfo::ak_BX || kind == ARMInstrInfo::ak_BLX_REG;
 }
 
 JitBlockEntry Compiler::CompileBlock(ARM* cpu, bool thumb, FetchedInstr instrs[], int instrsCount, bool hasMemoryInstr)

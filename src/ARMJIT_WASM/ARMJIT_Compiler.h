@@ -153,6 +153,39 @@ private:
     void Comp_ShiftReg(int op, bool carry);             // LocalB by LocalT, carry into LocalC
     void Comp_ALUOp(int op, int rd, bool setFlags, bool shifterCarry);  // a in LocalA, b in LocalB
 
+    // loads and stores (ARMJIT_LoadStore.cpp)
+    struct MemOffset
+    {
+        bool Imm;
+        u32 Value;            // the immediate
+        int Reg, Op, Amount;  // or a register shifted by a constant
+    };
+    void Comp_AddCycles_CDI();
+    void Comp_AddCycles_CD();
+    bool Comp_MemLoadLiteral(int size, bool signExtend, int rd, u32 addr);
+    void Comp_MemAccess(int rd, int rn, const MemOffset& offset, int size, int flags);
+    void Comp_MemRead(int size, bool signExtend);  // address in LocalT; pushes the value
+    void Comp_MemWrite(int size);                 // address in LocalT, value in LocalT2
+    s32 Comp_MemAccessBlock(int rn, u16 regs, bool store, bool preinc, bool decrement, bool skipLoadingRn);
+    void Comp_JumpToReg(bool restoreCPSR);        // to the address on the stack, through ARM::JumpTo
+
+    void A_Comp_MemWB();
+    void A_Comp_MemHalf();
+    void A_Comp_LDM_STM();
+    void A_Comp_BranchXchangeReg();
+    void T_Comp_MemReg();
+    void T_Comp_MemImm();
+    void T_Comp_MemRegHalf();
+    void T_Comp_MemImmHalf();
+    void T_Comp_LoadPCRel();
+    void T_Comp_MemSPRel();
+    void T_Comp_PUSH_POP();
+    void T_Comp_LDMIA_STMIA();
+    void T_Comp_BranchXchangeReg();
+
+    // LDM/STM data for the slow block transfer functions
+    alignas(8) u64 BlockTransferData[16] {};
+
     void A_Comp_ALU();
     void A_Comp_BranchImm();
     void T_Comp_ShiftImm();
