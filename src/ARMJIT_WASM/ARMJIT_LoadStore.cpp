@@ -527,6 +527,167 @@ s32 Compiler::Comp_MemAccessBlock(int rn, u16 regs, bool store, bool preinc, boo
     Code.Op(W_I32Add);
     Code.LocalSet(LocalT);
 
+    // Inline when the whole transfer is in one fast region (and, for a store, no JIT code in the
+    // 512-byte pages of its first and last word); otherwise the slow block transfer function.
+    struct Region
+    {
+        u32 Base, Mask;
+        const AddressRange* CodeIndex;  // nullptr: code never runs from it (DTCM)
+        int Kind;                       // 0 DTCM (ARM9), 1 main RAM, 2 ARM7 WRAM
+    };
+    Region regions[2];
+    int regionCount = 0;
+    if (Num == 0)
+    {
+        regions[regionCount++] = {Pointer(((ARMv5*)CurCPU)->DTCM), 0x3FFF, nullptr, 0};
+        regions[regionCount++] = {Pointer(NDS.MainRAM), NDS.MainRAMMask, NDS.JIT.CodeIndexMainRAM, 1};
+    }
+    else
+    {
+        regions[regionCount++] = {Pointer(NDS.MainRAM), NDS.MainRAMMask, NDS.JIT.CodeIndexMainRAM, 1};
+        regions[regionCount++] = {Pointer(NDS.ARM7WRAM), ARM7WRAMSize - 1, NDS.JIT.CodeIndexARM7WRAM, 2};
+    }
+    const u32 span = (regsCount - 1) * 4;
+
+    // the first word's address, aligned
+    Code.LocalGet(LocalT);
+    Code.I32Const(~3);
+    Code.Op(W_I32And);
+    Code.LocalSet(LocalT3);
+
+    auto inRegion = [&](const Region& region) {
+        // the first word in the region, and the transfer not wrapping past its end
+        switch (region.Kind)
+        {
+        case 0:
+            Code.LocalGet(LocalT3);
+            Code.LocalGet(LocalCPU);
+            Code.I32Load(offsetof(ARMv5, ITCMSize));
+            Code.Op(W_I32GeU);
+            Code.LocalGet(LocalT3);
+            Code.LocalGet(LocalCPU);
+            Code.I32Load(offsetof(ARMv5, DTCMMask));
+            Code.Op(W_I32And);
+            Code.LocalGet(LocalCPU);
+            Code.I32Load(offsetof(ARMv5, DTCMBase));
+            Code.Op(W_I32Eq);
+            Code.Op(W_I32And);
+            break;
+        case 1:
+            Code.LocalGet(LocalT3);
+            Code.I32Const(24);
+            Code.Op(W_I32ShrU);
+            Code.I32Const(0x02);
+            Code.Op(W_I32Eq);
+            if (Num == 0)
+            {
+                Code.LocalGet(LocalT3);
+                Code.LocalGet(LocalCPU);
+                Code.I32Load(offsetof(ARMv5, ITCMSize));
+                Code.Op(W_I32GeU);
+                Code.Op(W_I32And);
+                // not in the DTCM (which may sit over main RAM)
+                Code.LocalGet(LocalT3);
+                Code.LocalGet(LocalCPU);
+                Code.I32Load(offsetof(ARMv5, DTCMMask));
+                Code.Op(W_I32And);
+                Code.LocalGet(LocalCPU);
+                Code.I32Load(offsetof(ARMv5, DTCMBase));
+                Code.Op(W_I32Ne);
+                Code.Op(W_I32And);
+                Code.LocalGet(LocalT3);
+                Code.I32Const(span);
+                Code.Op(W_I32Add);
+                Code.LocalGet(LocalCPU);
+                Code.I32Load(offsetof(ARMv5, DTCMMask));
+                Code.Op(W_I32And);
+                Code.LocalGet(LocalCPU);
+                Code.I32Load(offsetof(ARMv5, DTCMBase));
+                Code.Op(W_I32Ne);
+                Code.Op(W_I32And);
+            }
+            break;
+        case 2:
+            Code.LocalGet(LocalT3);
+            Code.I32Const(0xFF800000);
+            Code.Op(W_I32And);
+            Code.I32Const(0x03800000);
+            Code.Op(W_I32Eq);
+            break;
+        }
+        Code.LocalGet(LocalT3);
+        Code.I32Const(region.Mask);
+        Code.Op(W_I32And);
+        Code.I32Const(region.Mask - span);
+        Code.Op(W_I32LeU);
+        Code.Op(W_I32And);
+        if (store && region.CodeIndex)
+        {
+            for (int end = 0; end < 2; end++)
+            {
+                Code.LocalGet(LocalT3);
+                if (end)
+                {
+                    Code.I32Const(span);
+                    Code.Op(W_I32Add);
+                }
+                Code.I32Const(region.Mask);
+                Code.Op(W_I32And);
+                Code.I32Const(9);
+                Code.Op(W_I32ShrU);
+                Code.I32Const(sizeof(AddressRange));
+                Code.Op(W_I32Mul);
+                Code.I32Load(Pointer(region.CodeIndex) + offsetof(AddressRange, Code));
+                Code.Op(W_I32Eqz);
+                Code.Op(W_I32And);
+            }
+        }
+    };
+
+    auto fastTransfer = [&](const Region& region) {
+        Code.LocalGet(LocalT3);
+        Code.I32Const(region.Mask);
+        Code.Op(W_I32And);
+        Code.I32Const(region.Base);
+        Code.Op(W_I32Add);
+        Code.LocalSet(LocalT2);
+        int i = 0;
+        for (int reg = 0; reg < 16; reg++)
+        {
+            if (!(regs & (1 << reg)))
+                continue;
+            if (store)
+            {
+                Code.LocalGet(LocalT2);
+                PushReg(reg);
+                Code.I32Store(i * 4);
+            }
+            else if (reg == 15)
+            {
+                // the PC goes where the jump code reads it
+                Code.I32Const(Pointer(BlockTransferData) + i * 8);
+                Code.LocalGet(LocalT2);
+                Code.I32Load(i * 4);
+                Code.I32Store(0);
+            }
+            else if (!(reg == rn && skipLoadingRn))
+            {
+                Code.LocalGet(LocalT2);
+                Code.I32Load(i * 4);
+                SetReg(reg);
+            }
+            i++;
+        }
+    };
+
+    for (int r = 0; r < regionCount; r++)
+    {
+        inRegion(regions[r]);
+        Code.If();
+        fastTransfer(regions[r]);
+        Code.Else();
+    }
+
     const u32 data = Pointer(BlockTransferData);
     if (store)
     {
@@ -571,6 +732,9 @@ s32 Compiler::Comp_MemAccessBlock(int rn, u16 regs, bool store, bool preinc, boo
             i++;
         }
     }
+
+    for (int r = 0; r < regionCount; r++)
+        Code.End();
 
     return offset;
 }

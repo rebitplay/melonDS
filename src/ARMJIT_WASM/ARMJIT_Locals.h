@@ -20,7 +20,8 @@ constexpr unsigned LocalC = 22;    // carry out, 0 or 1
 constexpr unsigned LocalV = 23;    // overflow, 0 or 1
 constexpr unsigned LocalT = 24;    // shift amounts, addresses
 constexpr unsigned LocalT2 = 25;
-constexpr unsigned LocalCount = 25; // besides the parameter
+constexpr unsigned LocalT3 = 26;
+constexpr unsigned LocalCount = 26; // besides the parameter
 
 constexpr unsigned OffR = offsetof(ARM, R);
 constexpr unsigned OffCycles = offsetof(ARM, Cycles);
