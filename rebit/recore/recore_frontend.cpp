@@ -77,7 +77,6 @@ RebitMicBuffer rebitMic;
 bool micOpen = false;
 double micPhase = 0;
 
-std::unique_ptr<Savestate> stateScratch;
 
 LayoutInfo CurrentLayout()
 {
@@ -257,10 +256,10 @@ void Log(retro_log_level level, const char* fmt, ...)
     va_start(args, fmt);
     std::vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
+    // stderr as well: Recore's host shows the module's output, as the 0.9.3 core's printf did
     if (log_cb)
         log_cb(level, "%s", line);
-    else
-        std::fputs(line, stderr);
+    std::fputs(line, stderr);
 }
 }
 
@@ -319,6 +318,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void rebit_mic_set_active(int on)
 {
     rebitMic.set_active(on != 0);
     micPhase = 0;
+    // the DS hears silence from now on, not what melonDS had buffered
+    if (!on && nds)
+        nds->Mic.ClearInput();
 }
 
 RETRO_API unsigned retro_api_version(void) { return RETRO_API_VERSION; }
@@ -350,7 +352,6 @@ RETRO_API void retro_init(void) {}
 RETRO_API void retro_deinit(void)
 {
     nds.reset();
-    stateScratch.reset();
 }
 
 RETRO_API void retro_get_system_info(retro_system_info* info)
@@ -492,32 +493,40 @@ RETRO_API void retro_unload_game(void)
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
-static Savestate* SaveToScratch()
+// A state is written into one buffer kept for the session (melonDS's own Savestate would allocate
+// 32 MB each time); it grows if a state ever outgrows it.
+static std::vector<u8> stateBuffer;
+
+static u32 SaveToBuffer()
 {
-    if (!stateScratch)
-        stateScratch = std::make_unique<Savestate>();
-    else
-        stateScratch->Rewind(true);
-    nds->DoSavestate(stateScratch.get());
-    return stateScratch->Error ? nullptr : stateScratch.get();
+    if (stateBuffer.empty())
+        stateBuffer.resize(24 * 1024 * 1024);
+    for (;;)
+    {
+        Savestate state(stateBuffer.data(), stateBuffer.size(), true);
+        nds->DoSavestate(&state);
+        state.Finish();
+        if (!state.Error)
+            return state.Length();
+        if (stateBuffer.size() >= 256 * 1024 * 1024)
+            return 0;
+        stateBuffer.resize(stateBuffer.size() * 2);
+    }
 }
 
 RETRO_API size_t retro_serialize_size(void)
 {
-    if (!nds)
-        return 0;
-    Savestate* state = SaveToScratch();
-    return state ? state->Length() : 0;
+    return nds ? SaveToBuffer() : 0;
 }
 
 RETRO_API bool retro_serialize(void* data, size_t size)
 {
     if (!nds)
         return false;
-    Savestate* state = SaveToScratch();
-    if (!state || state->Length() > size)
+    const u32 length = SaveToBuffer();
+    if (!length || length > size)
         return false;
-    memcpy(data, state->Buffer(), state->Length());
+    memcpy(data, stateBuffer.data(), length);
     return true;
 }
 
@@ -525,7 +534,14 @@ RETRO_API bool retro_unserialize(const void* data, size_t size)
 {
     if (!nds)
         return false;
-    Savestate state(const_cast<void*>(data), size, false);
+    // melonDS checks the length in the state's header; Recore may pass a zero-padded buffer
+    if (size < 12)
+        return false;
+    u32 length;
+    memcpy(&length, (const u8*)data + 8, 4);
+    if (length > size)
+        return false;
+    Savestate state(const_cast<void*>(data), length, false);
     if (state.Error)
         return false;
     return nds->DoSavestate(&state) && !state.Error;

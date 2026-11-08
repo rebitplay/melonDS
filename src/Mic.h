@@ -46,6 +46,9 @@ public:
     void StopAll();
 
     void Advance(u32 cycles);
+
+    // Rebit: drop buffered input (the host microphone stopped); not part of the state
+    void ClearInput();
     s16 ReadSample();
 
 private:

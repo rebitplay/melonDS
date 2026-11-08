@@ -215,6 +215,15 @@ void Mic::Advance(u32 cycles)
     }
 }
 
+void Mic::ClearInput()
+{
+    memset(InputBuffer, 0, sizeof(InputBuffer));
+    InputBufferWritePos = 0;
+    InputBufferReadPos = 0;
+    InputBufferLevel = 0;
+    CurSample = 0;
+}
+
 s16 Mic::ReadSample()
 {
     if (!OpenMask) return 0;

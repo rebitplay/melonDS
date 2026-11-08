@@ -26,3 +26,4 @@ freebios/FreeBIOS_Data.h
 freebios/bios*
 freebios/build/
 build-recore/
+melonds_recore.a
