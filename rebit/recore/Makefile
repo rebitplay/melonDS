@@ -1,6 +1,7 @@
 # melonDS 1.x core + the Recore frontend as one static archive, for Recore's build
 # (recore/recipes/melonds1x.json): emmake make -f rebit/recore/Makefile
-# Interpreter only (no JIT), software renderer, single thread.
+# The JIT with its WebAssembly back end (or the interpreter, by option), software renderer,
+# single thread.
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
 SRC := $(ROOT)/src
 OUT ?= $(ROOT)/build-recore
@@ -20,6 +21,7 @@ CORE_SOURCES := \
 	GPU.cpp GPU_Soft.cpp GPU2D.cpp GPU2D_Soft.cpp GPU3D.cpp GPU3D_Soft.cpp GPU3D_Texcache.cpp Mic.cpp \
 	NDS.cpp NDSCart.cpp ROMList.cpp FreeBIOS.cpp RTC.cpp Savestate.cpp SPI.cpp SPI_Firmware.cpp SPU.cpp \
 	Utils.cpp Wifi.cpp WifiAP.cpp \
+	ARMJIT.cpp ARMJIT_Memory.cpp ARM_InstrInfo.cpp ARMJIT_WASM/ARMJIT_Compiler.cpp \
 	DSP_HLE/UcodeBase.cpp DSP_HLE/AACUcode.cpp DSP_HLE/G711Ucode.cpp DSP_HLE/GraphicsUcode.cpp \
 	NDSCart/CartCommon.cpp NDSCart/CartRetail.cpp NDSCart/CartRetailNAND.cpp NDSCart/CartRetailIR.cpp \
 	NDSCart/CartRetailBT.cpp NDSCart/CartSD.cpp NDSCart/CartHomebrew.cpp NDSCart/CartR4.cpp \
@@ -34,9 +36,10 @@ OBJECTS := $(CORE_SOURCES:%.cpp=$(OUT)/core/%.o) $(CORE_C_SOURCES:%.c=$(OUT)/cor
 	$(FRONTEND_SOURCES:%.cpp=$(OUT)/frontend/%.o)
 
 INCLUDES := -I$(SRC) -I$(SRC)/teakra/include -I$(ROOT)/rebit/recore -I$(OUT)
-COMMON_FLAGS := -fwrapv $(INCLUDES) $(RECORE_DEFINES)
-override CXXFLAGS += -std=c++17 -Wno-invalid-offsetof $(COMMON_FLAGS)
-override CFLAGS += $(COMMON_FLAGS)
+# the JIT with the WebAssembly back end (src/ARMJIT_WASM), DS only
+COMMON_FLAGS := -fwrapv -DJIT_ENABLED -DREBIT_JIT_NDS_ONLY $(INCLUDES) $(RECORE_DEFINES)
+override CXXFLAGS += -std=c++17 -Wno-invalid-offsetof -MMD -MP $(COMMON_FLAGS)
+override CFLAGS += -MMD -MP $(COMMON_FLAGS)
 
 all: $(ARCHIVE)
 
@@ -60,6 +63,13 @@ $(OUT)/frontend/%.o: $(ROOT)/rebit/recore/%.cpp $(OUT)/version.h
 $(ARCHIVE): $(OBJECTS)
 	rm -f $@
 	$(AR) rcs $@ $(OBJECTS)
+
+# incremental builds: header dependencies, and a rebuild when the flags change
+-include $(OBJECTS:.o=.d)
+FLAGS_STAMP := $(OUT)/flags-$(shell echo '$(CXXFLAGS) $(CFLAGS)' | md5sum | cut -c1-12)
+$(FLAGS_STAMP):
+	@mkdir -p $(OUT) && rm -f $(OUT)/flags-* && touch $@
+$(OBJECTS): $(FLAGS_STAMP)
 
 clean:
 	rm -rf $(OUT) $(ARCHIVE)

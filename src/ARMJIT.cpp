@@ -44,16 +44,20 @@
 #include "Wifi.h"
 #include "NDSCart.h"
 #include "Platform.h"
+#if defined(__x86_64__)
 #include "ARMJIT_x64/ARMJIT_Offsets.h"
+#endif
 
 namespace melonDS
 {
 using Platform::Log;
 using Platform::LogLevel;
 
+#if defined(__x86_64__)
 static_assert(offsetof(ARM, CPSR) == ARM_CPSR_offset, "");
 static_assert(offsetof(ARM, Cycles) == ARM_Cycles_offset, "");
 static_assert(offsetof(ARM, StopExecution) == ARM_StopExecution_offset, "");
+#endif
 
 
 #define JIT_DEBUGPRINT(msg, ...)
@@ -65,7 +69,7 @@ const u32 CodeRegionSizes[ARMJIT_Memory::memregions_Count] =
     ITCMPhysicalSize,
     0,
     ARM9BIOSSize,
-    MainRAMMaxSize,
+    JitMainRAMCodeSize,
     SharedWRAMSize,
     0,
     0x100000,
@@ -74,11 +78,11 @@ const u32 CodeRegionSizes[ARMJIT_Memory::memregions_Count] =
     0,
     0,
     0x40000,
-    0x10000,
-    0x10000,
-    NWRAMSize,
-    NWRAMSize,
-    NWRAMSize,
+    JitBIOSDSiCodeSize,
+    JitBIOSDSiCodeSize,
+    JitNWRAMCodeSize,
+    JitNWRAMCodeSize,
+    JitNWRAMCodeSize,
 };
 
 u32 ARMJIT::LocaliseCodeAddress(u32 num, u32 addr) const noexcept

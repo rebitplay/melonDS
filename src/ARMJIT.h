@@ -41,6 +41,19 @@ namespace melonDS
 class ARM;
 
 class JitBlock;
+
+// Rebit (WASM, DS only): the block lookup tables are sized for the DS's 4 MB of main RAM and
+// leave out the DSi-only regions, ~25 MB instead of ~75 MB
+#ifdef REBIT_JIT_NDS_ONLY
+constexpr u32 JitMainRAMCodeSize = 0x400000;
+constexpr u32 JitDSiCodeSize = 512;
+#else
+constexpr u32 JitMainRAMCodeSize = MainRAMMaxSize;
+constexpr u32 JitDSiCodeSize = 0;
+#endif
+constexpr u32 JitBIOSDSiCodeSize = JitDSiCodeSize ? JitDSiCodeSize : 0x10000;
+constexpr u32 JitNWRAMCodeSize = JitDSiCodeSize ? JitDSiCodeSize : NWRAMSize;
+
 class ARMJIT
 {
 public:
@@ -99,32 +112,32 @@ public:
 
 
     AddressRange CodeIndexITCM[ITCMPhysicalSize / 512] {};
-    AddressRange CodeIndexMainRAM[MainRAMMaxSize / 512] {};
+    AddressRange CodeIndexMainRAM[JitMainRAMCodeSize / 512] {};
     AddressRange CodeIndexSWRAM[SharedWRAMSize / 512] {};
     AddressRange CodeIndexVRAM[0x100000 / 512] {};
     AddressRange CodeIndexARM9BIOS[ARM9BIOSSize / 512] {};
     AddressRange CodeIndexARM7BIOS[ARM7BIOSSize / 512] {};
     AddressRange CodeIndexARM7WRAM[ARM7WRAMSize / 512] {};
     AddressRange CodeIndexARM7WVRAM[0x40000 / 512] {};
-    AddressRange CodeIndexBIOS9DSi[0x10000 / 512] {};
-    AddressRange CodeIndexBIOS7DSi[0x10000 / 512] {};
-    AddressRange CodeIndexNWRAM_A[NWRAMSize / 512] {};
-    AddressRange CodeIndexNWRAM_B[NWRAMSize / 512] {};
-    AddressRange CodeIndexNWRAM_C[NWRAMSize / 512] {};
+    AddressRange CodeIndexBIOS9DSi[JitBIOSDSiCodeSize / 512] {};
+    AddressRange CodeIndexBIOS7DSi[JitBIOSDSiCodeSize / 512] {};
+    AddressRange CodeIndexNWRAM_A[JitNWRAMCodeSize / 512] {};
+    AddressRange CodeIndexNWRAM_B[JitNWRAMCodeSize / 512] {};
+    AddressRange CodeIndexNWRAM_C[JitNWRAMCodeSize / 512] {};
 
     u64 FastBlockLookupITCM[ITCMPhysicalSize / 2] {};
-    u64 FastBlockLookupMainRAM[MainRAMMaxSize / 2] {};
+    u64 FastBlockLookupMainRAM[JitMainRAMCodeSize / 2] {};
     u64 FastBlockLookupSWRAM[SharedWRAMSize / 2] {};
     u64 FastBlockLookupVRAM[0x100000 / 2] {};
     u64 FastBlockLookupARM9BIOS[ARM9BIOSSize / 2] {};
     u64 FastBlockLookupARM7BIOS[ARM7BIOSSize / 2] {};
     u64 FastBlockLookupARM7WRAM[ARM7WRAMSize / 2] {};
     u64 FastBlockLookupARM7WVRAM[0x40000 / 2] {};
-    u64 FastBlockLookupBIOS9DSi[0x10000 / 2] {};
-    u64 FastBlockLookupBIOS7DSi[0x10000 / 2] {};
-    u64 FastBlockLookupNWRAM_A[NWRAMSize / 2] {};
-    u64 FastBlockLookupNWRAM_B[NWRAMSize / 2] {};
-    u64 FastBlockLookupNWRAM_C[NWRAMSize / 2] {};
+    u64 FastBlockLookupBIOS9DSi[JitBIOSDSiCodeSize / 2] {};
+    u64 FastBlockLookupBIOS7DSi[JitBIOSDSiCodeSize / 2] {};
+    u64 FastBlockLookupNWRAM_A[JitNWRAMCodeSize / 2] {};
+    u64 FastBlockLookupNWRAM_B[JitNWRAMCodeSize / 2] {};
+    u64 FastBlockLookupNWRAM_C[JitNWRAMCodeSize / 2] {};
 
     AddressRange* const CodeMemRegions[ARMJIT_Memory::memregions_Count] =
     {

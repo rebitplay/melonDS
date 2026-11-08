@@ -6,6 +6,7 @@
 // and the Recore `mic` extension. No OpenGL, WFC, cheats or DSi yet.
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
@@ -63,6 +64,12 @@ std::string savePath;
 
 Layout layout = Layout::TopBottom;
 bool touchEnabled = true;
+bool jitEnabled = true;
+bool jitStats = false;
+bool jitBranchOptimizations = true;
+bool jitLiteralOptimizations = true;
+int jitMaxBlockSize = 32;
+u64 framesRun = 0;
 bool touching = false;
 u32 frameBuffer[ScreenW * 2 * ScreenH * 2];
 
@@ -113,6 +120,16 @@ void ReadVariables()
     }
     if (const char* value = GetVariable("melonds_touch_mode"))
         touchEnabled = strcmp(value, "Disabled") != 0;
+    if (const char* value = GetVariable("melonds_jit"))
+        jitEnabled = strcmp(value, "disabled") != 0;
+    if (const char* value = GetVariable("melonds_jit_stats"))
+        jitStats = strcmp(value, "enabled") == 0;
+    if (const char* value = GetVariable("melonds_jit_branch"))
+        jitBranchOptimizations = strcmp(value, "disabled") != 0;
+    if (const char* value = GetVariable("melonds_jit_literal"))
+        jitLiteralOptimizations = strcmp(value, "disabled") != 0;
+    if (const char* value = GetVariable("melonds_jit_block_size"))
+        jitMaxBlockSize = atoi(value) > 0 ? atoi(value) : 32;
 }
 
 const char* SystemDirectory()
@@ -331,6 +348,11 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
     static const retro_variable variables[] = {
         {"melonds_screen_layout", "Screen layout; Top/Bottom|Bottom/Top|Left/Right|Right/Left|Top Only|Bottom Only"},
         {"melonds_touch_mode", "Touch mode; Touch|Disabled"},
+        {"melonds_jit", "JIT (ARM code compiled to WebAssembly, read at load); enabled|disabled"},
+        {"melonds_jit_stats", "JIT statistics in the log every 60 frames (diagnostics); disabled|enabled"},
+        {"melonds_jit_branch", "JIT branch following (diagnostics); enabled|disabled"},
+        {"melonds_jit_literal", "JIT literal optimisation (diagnostics); enabled|disabled"},
+        {"melonds_jit_block_size", "JIT maximum block size (diagnostics); 32|1|2|4|8|16"},
         {"melonds_opengl_renderer", "OpenGL renderer (not yet in the 1.x core); disabled"},
         {"melonds_wfc_online", "Nintendo WFC online (not yet in the 1.x core); disabled"},
         {nullptr, nullptr},
@@ -405,6 +427,16 @@ RETRO_API void retro_run(void)
 
     UpdateInput();
     nds->RunFrame();
+    framesRun++;
+#ifdef JIT_ENABLED
+    if (jitStats && framesRun % 60 == 0)
+    {
+        auto& compiler = nds->JIT.JITCompiler;
+        Log(RETRO_LOG_INFO, "JIT: frame %llu, %u blocks compiled, %llu bytes, %u ms compiling\n",
+            (unsigned long long)framesRun, compiler.BlocksCompiled, (unsigned long long)compiler.BytesEmitted,
+            (unsigned)(compiler.CompileMicroseconds / 1000));
+    }
+#endif
     Present();
     DrainAudio();
     FlushSave(false);
@@ -430,7 +462,12 @@ RETRO_API bool retro_load_game(const retro_game_info* game)
     savePath = std::string(SaveDirectory()) + "/" + base + ".sav";
 
     NDSArgs args;
-    args.JIT = std::nullopt;
+    // melonDS's JIT with the WebAssembly back end. No fast memory (it needs memory mapping) and,
+    // with branch following and idle loop detection.
+    if (jitEnabled)
+        args.JIT = JITArgs {(unsigned)jitMaxBlockSize, jitLiteralOptimizations, jitBranchOptimizations, false};
+    else
+        args.JIT = std::nullopt;
     args.OutputSampleRate = 32.0 * 1024.0;
 
     const std::string system = SystemDirectory();

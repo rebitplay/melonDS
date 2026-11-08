@@ -198,6 +198,10 @@ static struct sigaction OldSaBus;
 
 void ARMJIT_Memory::SigsegvHandler(int sig, siginfo_t* info, void* rawContext)
 {
+#ifdef __EMSCRIPTEN__
+    // Rebit (WASM): no fastmem, so no faults to handle
+    return;
+#else
     if (sig != SIGSEGV && sig != SIGBUS)
     {
         // We are not interested in other signals - handle it as usual.
@@ -245,6 +249,7 @@ void ARMJIT_Memory::SigsegvHandler(int sig, siginfo_t* info, void* rawContext)
       return;
     }
     oldSa->sa_handler(sig);
+#endif
 }
 
 #endif
@@ -288,7 +293,9 @@ bool ARMJIT_Memory::MapIntoRange(u32 addr, u32 num, u32 offset, u32 size) noexce
     CHECK_ALIGNED(size);
 
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
-#ifdef __SWITCH__
+#ifdef __EMSCRIPTEN__
+    return false;
+#elif defined(__SWITCH__)
     Result r = (svcMapProcessMemory(dst, envGetOwnProcessHandle(),
         (u64)(MemoryBaseCodeMem + offset), size));
     return R_SUCCEEDED(r);
@@ -346,7 +353,9 @@ bool ARMJIT_Memory::UnmapFromRange(u32 addr, u32 num, u32 offset, u32 size) noex
     CHECK_ALIGNED(size);
 
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
-#ifdef __SWITCH__
+#ifdef __EMSCRIPTEN__
+    return true;
+#elif defined(__SWITCH__)
     Result r = svcUnmapProcessMemory(dst, envGetOwnProcessHandle(),
         (u64)(MemoryBaseCodeMem + offset), size);
     return R_SUCCEEDED(r);
@@ -404,7 +413,9 @@ void ARMJIT_Memory::SetCodeProtectionRange(u32 addr, u32 size, u32 num, int prot
     CHECK_ALIGNED(size);
 
     u8* dst = (u8*)(num == 0 ? FastMem9Start : FastMem7Start) + addr;
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+    (void)dst;
+#elif defined(_WIN32)
     DWORD winProtection, oldProtection;
     if (protection == 0)
         winProtection = PAGE_NOACCESS;
@@ -738,12 +749,20 @@ bool ARMJIT_Memory::MapAtAddress(u32 addr) noexcept
     return true;
 }
 
+#ifdef __EMSCRIPTEN__
+// Rebit (WASM): no pages to protect, but the code index still groups blocks by page
+u32 ARMJIT_Memory::PageSize = RegularPageSize;
+u32 ARMJIT_Memory::PageShift = 12;
+#else
 u32 ARMJIT_Memory::PageSize = 0;
 u32 ARMJIT_Memory::PageShift = 0;
+#endif
 
 bool ARMJIT_Memory::IsFastMemSupported()
 {
-#if defined(__APPLE__) || defined(__OpenBSD__)
+#if defined(__EMSCRIPTEN__)
+    return false;
+#elif defined(__APPLE__) || defined(__OpenBSD__)
     return false;
 #else
     static bool initialised = false;
@@ -769,7 +788,8 @@ bool ARMJIT_Memory::IsFastMemSupported()
 
 void ARMJIT_Memory::RegisterFaultHandler()
 {
-#ifdef _WIN32
+#if defined(__EMSCRIPTEN__)
+#elif defined(_WIN32)
     ExceptionHandlerHandle = AddVectoredExceptionHandler(1, ExceptionHandler);
 
     KernelBaseDll = LoadLibrary("KernelBase.dll");
@@ -798,7 +818,8 @@ void ARMJIT_Memory::RegisterFaultHandler()
 
 void ARMJIT_Memory::UnregisterFaultHandler()
 {
-#ifdef _WIN32
+#if defined(__EMSCRIPTEN__)
+#elif defined(_WIN32)
     if (ExceptionHandlerHandle)
     {
         RemoveVectoredExceptionHandler(ExceptionHandlerHandle);
@@ -844,7 +865,10 @@ bool ARMJIT_Memory::FaultHandler(FaultDescription& faultDesc, melonDS::NDS& nds)
 ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 {
     ARMJIT_Global::Init();
-#if defined(__SWITCH__)
+#if defined(__EMSCRIPTEN__)
+    // Rebit (WASM): no fastmem; the DS memory is one plain allocation
+    MemoryBase = static_cast<u8*>(calloc(MemoryTotalSize, 1));
+#elif defined(__SWITCH__)
     MemoryBase = (u8*)aligned_alloc(0x1000, MemoryTotalSize);
     virtmemLock();
     MemoryBaseCodeMem = (u8*)virtmemFindCodeMemory(MemoryTotalSize, 0x1000);
@@ -923,13 +947,21 @@ ARMJIT_Memory::ARMJIT_Memory(melonDS::NDS& nds) : NDS(nds)
 
     mmap(MemoryBase, MemoryTotalSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, MemoryFile, 0);
 #endif
+#if defined(__EMSCRIPTEN__)
+    FastMem9Start = nullptr;
+    FastMem7Start = nullptr;
+    return;
+#endif
     FastMem9Start = MemoryBase+MemoryTotalSize;
     FastMem7Start = static_cast<u8*>(FastMem9Start)+AddrSpaceSize;
 }
 
 ARMJIT_Memory::~ARMJIT_Memory() noexcept
 {
-#if defined(__SWITCH__)
+#if defined(__EMSCRIPTEN__)
+    free(MemoryBase);
+    MemoryBase = nullptr;
+#elif defined(__SWITCH__)
     virtmemLock();
     if (FastMem9Reservation)
         virtmemRemoveReservation(FastMem9Reservation);
