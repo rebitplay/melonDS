@@ -5,6 +5,7 @@
 // touch through the pointer, 32768 Hz audio, the in-game save as /saves/<rom>.sav, states, reset
 // the Recore `mic` extension, the OpenGL renderer on WebGL2 (by option) and Nintendo WFC through
 // the Rebit proxy (always on, wfc/net_wfc.cpp). No cheats or DSi yet.
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -53,14 +54,21 @@ retro_log_printf_t log_cb;
 constexpr int ScreenW = 256;
 constexpr int ScreenH = 192;
 
-enum class Layout { TopBottom, BottomTop, LeftRight, RightLeft, TopOnly, BottomOnly };
+enum class Layout { TopBottom, BottomTop, LeftRight, RightLeft, TopOnly, BottomOnly, HybridTop, HybridBottom };
 
 struct LayoutInfo
 {
     int width, height;
     int topX, topY;       // -1: not shown
     int bottomX, bottomY; // -1: not shown
+    int topScale = 1, bottomScale = 1;
 };
+
+// Hybrid layouts as the 0.9.3 core draws them (hybrid ratio 2, small screen "Bottom"): the main
+// screen at 2x on the left and the other screen at 1x in the right column, 772x384 in all
+constexpr int HybridW = ScreenW * 2 + ScreenW + 4;
+constexpr int HybridH = ScreenH * 2;
+constexpr int HybridSmallX = ScreenW * 2 + 2;
 
 std::unique_ptr<NDS> nds;
 void Log(retro_log_level level, const char* fmt, ...);
@@ -83,7 +91,7 @@ bool jitLiteralOptimizations = true;
 int jitMaxBlockSize = 32;
 u64 framesRun = 0;
 bool touching = false;
-u32 frameBuffer[ScreenW * 2 * ScreenH * 2];
+u32 frameBuffer[HybridW * HybridH];
 
 // in-game save: melonDS hands over the whole save on every write; it reaches the file once the game
 // has stopped writing for a while, as the 0.9.3 frontend did
@@ -106,6 +114,10 @@ LayoutInfo CurrentLayout()
     case Layout::RightLeft: return {ScreenW * 2, ScreenH, ScreenW, 0, 0, 0};
     case Layout::TopOnly: return {ScreenW, ScreenH, 0, 0, -1, -1};
     case Layout::BottomOnly: return {ScreenW, ScreenH, -1, -1, 0, 0};
+    // big top screen, the touch screen small at the lower right
+    case Layout::HybridTop: return {HybridW, HybridH, 0, 0, HybridSmallX, ScreenH, 2, 1};
+    // big touch screen, the top screen small at the upper right
+    case Layout::HybridBottom: return {HybridW, HybridH, HybridSmallX, 0, 0, 0, 1, 2};
     case Layout::TopBottom:
     default: return {ScreenW, ScreenH * 2, 0, 0, 0, ScreenH};
     }
@@ -128,6 +140,8 @@ void ReadVariables()
         else if (!strcmp(value, "Right/Left")) layout = Layout::RightLeft;
         else if (!strcmp(value, "Top Only")) layout = Layout::TopOnly;
         else if (!strcmp(value, "Bottom Only")) layout = Layout::BottomOnly;
+        else if (!strcmp(value, "Hybrid Top")) layout = Layout::HybridTop;
+        else if (!strcmp(value, "Hybrid Bottom")) layout = Layout::HybridBottom;
         else layout = Layout::TopBottom;
     }
     if (const char* value = GetVariable("melonds_touch_mode"))
@@ -233,8 +247,8 @@ void UpdateInput()
     {
         const int px = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
         const int py = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
-        const int x = (px + 0x8000) * info.width / 0x10000 - info.bottomX;
-        const int y = (py + 0x8000) * info.height / 0x10000 - info.bottomY;
+        const int x = ((px + 0x8000) * info.width / 0x10000 - info.bottomX) / info.bottomScale;
+        const int y = ((py + 0x8000) * info.height / 0x10000 - info.bottomY) / info.bottomScale;
         if (x >= 0 && x < ScreenW && y >= 0 && y < ScreenH)
         {
             nds->TouchScreen(x, y);
@@ -271,19 +285,20 @@ void PresentGL()
     // the renderer's size: 256x192 per screen times its scale
     const int scale = 1;
     const int w = ScreenW * scale, h = ScreenH * scale;
-    auto blit = [&](int layer, int x0, int y0) {
+    auto blit = [&](int layer, int x0, int y0, int screenScale) {
         if (x0 < 0 || !texture)
             return;
         glBindFramebuffer(GL_READ_FRAMEBUFFER, presentReadFB);
         glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0, layer);
         glReadBuffer(GL_COLOR_ATTACHMENT0);
+        const int dw = ScreenW * screenScale, dh = ScreenH * screenScale;
         // Recore's target has its origin at the bottom left; the layout's at the top left
-        const int dy0 = info.height - y0 - ScreenH;
+        const int dy0 = info.height - y0 - dh;
         // the renderer's screens are stored top row first: flipped on the way
-        glBlitFramebuffer(0, h, w, 0, x0, dy0, x0 + ScreenW, dy0 + ScreenH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBlitFramebuffer(0, h, w, 0, x0, dy0, x0 + dw, dy0 + dh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     };
-    blit(0, info.topX, info.topY);
-    blit(1, info.bottomX, info.bottomY);
+    blit(0, info.topX, info.topY, info.topScale);
+    blit(1, info.bottomX, info.bottomY, info.bottomScale);
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, oldRead);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, oldDraw);
@@ -305,15 +320,27 @@ void Present()
     if (!nds->GPU.GetRenderer().GetFramebuffers(&top, &bottom) || !top || !bottom)
         return;
     const LayoutInfo info = CurrentLayout();
-    auto blit = [&](const void* source, int x0, int y0) {
+    auto blit = [&](const void* source, int x0, int y0, int screenScale) {
         if (x0 < 0)
             return;
         const u32* src = static_cast<const u32*>(source);
-        for (int y = 0; y < ScreenH; y++)
-            memcpy(&frameBuffer[(y0 + y) * info.width + x0], &src[y * ScreenW], ScreenW * sizeof(u32));
+        if (screenScale == 1)
+        {
+            for (int y = 0; y < ScreenH; y++)
+                memcpy(&frameBuffer[(y0 + y) * info.width + x0], &src[y * ScreenW], ScreenW * sizeof(u32));
+            return;
+        }
+        // 2x, nearest neighbour
+        for (int y = 0; y < ScreenH * 2; y++)
+        {
+            const u32* row = &src[(y >> 1) * ScreenW];
+            u32* out = &frameBuffer[(y0 + y) * info.width + x0];
+            for (int x = 0; x < ScreenW; x++)
+                out[x * 2] = out[x * 2 + 1] = row[x];
+        }
     };
-    blit(top, info.topX, info.topY);
-    blit(bottom, info.bottomX, info.bottomY);
+    blit(top, info.topX, info.topY, info.topScale);
+    blit(bottom, info.bottomX, info.bottomY, info.bottomScale);
     video_cb(frameBuffer, info.width, info.height, info.width * sizeof(u32));
 }
 
@@ -384,6 +411,10 @@ void DrainAudio()
         const int read = nds->SPU.ReadOutput(buffer, available);
         if (read <= 0)
             break;
+        // melonDS 1.x mixes 6 dB louder than the 0.9.3 core (and clips loud games such as Mario
+        // Kart DS); halved, the two cores play at the same level
+        for (int i = 0; i < read * 2; i++)
+            buffer[i] >>= 1;
         audio_batch_cb(buffer, read);
     }
 }
@@ -481,7 +512,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
 {
     environ_cb = cb;
     static const retro_variable variables[] = {
-        {"melonds_screen_layout", "Screen layout; Top/Bottom|Bottom/Top|Left/Right|Right/Left|Top Only|Bottom Only"},
+        {"melonds_screen_layout", "Screen layout; Top/Bottom|Bottom/Top|Left/Right|Right/Left|Top Only|Bottom Only|Hybrid Top|Hybrid Bottom"},
         {"melonds_touch_mode", "Touch mode; Touch|Disabled"},
         {"melonds_jit", "JIT (ARM code compiled to WebAssembly, read at load); enabled|disabled"},
         {"melonds_jit_stats", "JIT statistics in the log every 60 frames (diagnostics); disabled|enabled"},
@@ -528,8 +559,9 @@ RETRO_API void retro_get_system_av_info(retro_system_av_info* info)
     info->timing.sample_rate = 32.0 * 1024.0;
     info->geometry.base_width = layoutInfo.width;
     info->geometry.base_height = layoutInfo.height;
-    info->geometry.max_width = ScreenW * 2;
-    info->geometry.max_height = ScreenH * 2;
+    // the largest layout: hybrid (772x384); the render target is allocated for it
+    info->geometry.max_width = HybridW;
+    info->geometry.max_height = HybridH;
     info->geometry.aspect_ratio = (float)layoutInfo.width / layoutInfo.height;
 }
 
@@ -554,6 +586,8 @@ RETRO_API void retro_run(void)
         ReadVariables();
         if (layout != before)
         {
+            // hybrid layouts leave a corner empty: no pixels from the previous layout there
+            memset(frameBuffer, 0, sizeof(frameBuffer));
             retro_system_av_info av;
             retro_get_system_av_info(&av);
             environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
@@ -776,5 +810,38 @@ RETRO_API size_t retro_get_memory_size(unsigned id)
     return nds && id == RETRO_MEMORY_SYSTEM_RAM ? 0x400000 : 0;
 }
 
-RETRO_API void retro_cheat_reset(void) {}
-RETRO_API void retro_cheat_set(unsigned, bool, const char*) {}
+// Action Replay codes through melonDS's AREngine, which runs them in the ARM7 VBlank interrupt as a
+// real Action Replay does (every frame). A code is the hex words the player pasted, in pairs, with
+// spaces, '+' or new lines between them (the 0.9.3 core took ' ' and '+' and ran a code once).
+RETRO_API void retro_cheat_reset(void)
+{
+    if (nds)
+        nds->AREngine.Cheats.clear();
+}
+
+RETRO_API void retro_cheat_set(unsigned, bool enabled, const char* code)
+{
+    if (!nds || !enabled || !code)
+        return;
+    ARCode cheat {};
+    cheat.Parent = nullptr;
+    cheat.Name = code;
+    cheat.Enabled = true;
+    for (const char* p = code; *p;)
+    {
+        if (!isxdigit((unsigned char)*p))
+        {
+            p++;
+            continue;
+        }
+        char* end = nullptr;
+        cheat.Code.push_back((u32)strtoul(p, &end, 16));
+        p = end;
+    }
+    if (cheat.Code.size() % 2)
+        cheat.Code.pop_back(); // codes are pairs of words
+    if (cheat.Code.empty())
+        return;
+    Log(RETRO_LOG_INFO, "melonDS: cheat with %u code lines\n", (unsigned)(cheat.Code.size() / 2));
+    nds->AREngine.Cheats.push_back(std::move(cheat));
+}
