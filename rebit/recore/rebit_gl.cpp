@@ -16,6 +16,17 @@ EM_JS(void, rebit_gl_color_maski, (unsigned index, int r, int g, int b, int a), 
     else if (index === 0) gl.colorMask(!!r, !!g, !!b, !!a);
 });
 
+EM_JS(int, rebit_gl_has_draw_buffers_indexed, (), {
+    const context = GL.currentContext;
+    const gl = context && context.GLctx;
+    return gl && gl.getExtension("OES_draw_buffers_indexed") ? 1 : 0;
+});
+
+bool rebitHasDrawBuffersIndexed()
+{
+    return rebit_gl_has_draw_buffers_indexed() != 0;
+}
+
 void rebitColorMaski(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
 {
     rebit_gl_color_maski(buf, r, g, b, a);

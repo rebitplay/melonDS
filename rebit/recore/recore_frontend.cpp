@@ -318,6 +318,15 @@ void GLContextReset()
 {
     if (!nds)
         return;
+    // The renderer masks colour per draw buffer; without OES_draw_buffers_indexed it would draw
+    // wrong, so such browsers keep the software renderer.
+    if (!rebitHasDrawBuffersIndexed())
+    {
+        Log(RETRO_LOG_WARN, "melonDS: no OES_draw_buffers_indexed; software rendering\n");
+        glActive = false;
+        presentReadFB = 0;
+        return;
+    }
     nds->SetRenderer(std::make_unique<GLRenderer>(*nds, false));
     glActive = dynamic_cast<GLRenderer*>(&nds->GetRenderer()) != nullptr;
     if (glActive)
@@ -537,6 +546,9 @@ RETRO_API void retro_run(void)
     }
 
     UpdateInput();
+    // a frame the frontend will not show (fast-forward) is not presented
+    int avEnable = 3;
+    const bool showVideo = !environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &avEnable) || (avEnable & 1);
     nds->RunFrame();
     framesRun++;
 #ifdef JIT_ENABLED
@@ -548,7 +560,8 @@ RETRO_API void retro_run(void)
             (unsigned)(compiler.CompileMicroseconds / 1000));
     }
 #endif
-    Present();
+    if (showVideo)
+        Present();
     DrainAudio();
     FlushSave(false);
 }

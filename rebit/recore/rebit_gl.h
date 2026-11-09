@@ -14,6 +14,7 @@
 // per-draw-buffer colour mask: OES_draw_buffers_indexed; without it, buffer 0 only
 void rebitColorMaski(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 #define glColorMaski rebitColorMaski
+bool rebitHasDrawBuffersIndexed();
 
 static inline void rebitDrawBuffer(GLenum buffer)
 {
