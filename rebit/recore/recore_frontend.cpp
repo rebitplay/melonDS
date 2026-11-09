@@ -3,7 +3,8 @@
 // It does what the Recore single-player core needs: the game from memory, BIOS and firmware from
 // the system directory (FreeBIOS and direct boot otherwise), XRGB8888 screens in a few layouts,
 // touch through the pointer, 32768 Hz audio, the in-game save as /saves/<rom>.sav, states, reset
-// and the Recore `mic` extension. No OpenGL, WFC, cheats or DSi yet.
+// the Recore `mic` extension, the OpenGL renderer on WebGL2 (by option) and Nintendo WFC through
+// the Rebit proxy (always on, wfc/net_wfc.cpp). No cheats or DSi yet.
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -26,6 +27,8 @@
 #include "Platform.h"
 #include "SPI.h"
 #include "SPI_Firmware.h"
+#include "WifiAP.h"
+#include "wfc/net_wfc.h"
 #include "Savestate.h"
 #include "version.h"
 
@@ -418,6 +421,19 @@ void MicOpened(bool open)
     micOpen = open;
 }
 
+// Written back to /system/firmware.bin, as the 0.9.3 core does: the host reads the Wi-Fi slots from
+// there and keeps them with the player's DS identity, so a game's WFC user ID (and its friend codes)
+// survives the session.
+void StoreFirmware(const u8* data, u32 length)
+{
+    const std::string path = std::string(SystemDirectory()) + "/firmware.bin";
+    if (std::FILE* file = std::fopen(path.c_str(), "wb"))
+    {
+        std::fwrite(data, 1, length, file);
+        std::fclose(file);
+    }
+}
+
 // The DS microphone reads at ~47.6 kHz; the host pushes 44.1 kHz mono. Nearest-sample resampling.
 int MicRead(s16* data, int maxlength)
 {
@@ -474,7 +490,6 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
         {"melonds_jit_block_size", "JIT maximum block size (diagnostics); 32|1|2|4|8|16"},
         {"melonds_jit_native", "JIT native groups (diagnostics: 1 ARM ALU, 2 ARM branch, 4 Thumb ALU, 8 Thumb branch, 16 memory, 32 register branches, 0x10000 idle loops); 0xffffffff|0|0x1|0x2|0x3|0x4|0x5|0x6|0x7|0x8|0x9|0xa|0xb|0xc|0xd|0xe|0xf|0x10|0x11|0x12|0x13|0x14|0x15|0x16|0x17|0x18|0x19|0x1a|0x1b|0x1c|0x1d|0x1e|0x1f|0x20|0x21|0x22|0x23|0x24|0x25|0x26|0x27|0x28|0x29|0x2a|0x2b|0x2c|0x2d|0x2e|0x2f|0x30|0x31|0x32|0x33|0x34|0x35|0x36|0x37|0x38|0x39|0x3a|0x3b|0x3c|0x3d|0x3e|0x3f|0x10000|0x10001|0x10002|0x10003|0x10004|0x10005|0x10006|0x10007|0x10008|0x10009|0x1000a|0x1000b|0x1000c|0x1000d|0x1000e|0x1000f|0x10010|0x10011|0x10012|0x10013|0x10014|0x10015|0x10016|0x10017|0x10018|0x10019|0x1001a|0x1001b|0x1001c|0x1001d|0x1001e|0x1001f|0x10020|0x10021|0x10022|0x10023|0x10024|0x10025|0x10026|0x10027|0x10028|0x10029|0x1002a|0x1002b|0x1002c|0x1002d|0x1002e|0x1002f|0x10030|0x10031|0x10032|0x10033|0x10034|0x10035|0x10036|0x10037|0x10038|0x10039|0x1003a|0x1003b|0x1003c|0x1003d|0x1003e|0x1003f"},
         {"melonds_opengl_renderer", "OpenGL renderer (WebGL2, read at load); disabled|enabled"},
-        {"melonds_wfc_online", "Nintendo WFC online (not yet in the 1.x core); disabled"},
         {nullptr, nullptr},
     };
     cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)variables);
@@ -566,6 +581,41 @@ RETRO_API void retro_run(void)
     FlushSave(false);
 }
 
+// Nintendo WFC through the Rebit proxy, always on: points WFC connection 1 at melonDS's virtual
+// access point (DHCP, automatic DNS) and keeps its WFC user ID; erased slots 2 and 3 get valid
+// "not configured" entries, since a bad checksum makes games reject the settings. The same patch
+// as the 0.9.3 core's ConfigureRebitWfcAccessPoint (src/SPI.cpp), on 1.x's firmware buffer.
+static void ConfigureWfcAccessPoint(Firmware& firmware)
+{
+    u8* ap = firmware.GetWifiAccessPointPosition();
+    const char* ssid = WifiAP::APName;
+    const bool configured = ap[0xE7] == 0x00 && !strncmp((const char*)&ap[0x40], ssid, 32) && !ap[0xC0]
+        && !ap[0xC4] && !ap[0xC8] && !ap[0xD0] && ap[0xE6] == 0
+        && *(u16*)&ap[0xFE] == CRC16(ap, 0xFE, 0x0000);
+    if (!configured)
+    {
+        u8 wfcid[6];
+        memcpy(wfcid, &ap[0xF0], 6);
+        const bool keepid = ap[0xE7] == 0x00;
+        memset(ap, 0, 0x100);
+        strncpy((char*)&ap[0x40], ssid, 32);
+        ap[0xE7] = 0x00; // status: normal
+        ap[0xEF] = 0x01; // connection configured
+        if (keepid)
+            memcpy(&ap[0xF0], wfcid, 6);
+        *(u16*)&ap[0xFE] = CRC16(ap, 0xFE, 0x0000);
+    }
+    for (u8* slot = ap + 0x100; slot <= ap + 0x200; slot += 0x100)
+    {
+        if (*(u16*)&slot[0xFE] == CRC16(slot, 0xFE, 0x0000))
+            continue;
+        memset(slot, 0, 0x100);
+        slot[0xE7] = 0xFF; // status: not configured
+        slot[0xEF] = 0x01;
+        *(u16*)&slot[0xFE] = CRC16(slot, 0xFE, 0x0000);
+    }
+}
+
 RETRO_API bool retro_load_game(const retro_game_info* game)
 {
     if (!game || !game->data || !game->size)
@@ -610,6 +660,7 @@ RETRO_API bool retro_load_game(const retro_game_info* game)
         if (firmware.Buffer())
         {
             Log(RETRO_LOG_INFO, "FW: USER0 CRC16 = %s\n", firmware.GetEffectiveUserData().ChecksumValid() ? "GOOD" : "BAD");
+            ConfigureWfcAccessPoint(firmware);
             args.Firmware = std::move(firmware);
         }
     }
@@ -656,6 +707,7 @@ RETRO_API void retro_unload_game(void)
 {
     FlushSave(true);
     nds.reset();
+    rebit::wfc::DeInit();
 }
 
 RETRO_API unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }

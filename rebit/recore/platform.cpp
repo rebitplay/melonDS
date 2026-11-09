@@ -10,6 +10,7 @@
 #include "Platform.h"
 #include "SPI_Firmware.h"
 #include "frontend_internal.h"
+#include "wfc/net_wfc.h"
 
 namespace melonDS::Platform
 {
@@ -202,7 +203,7 @@ void WriteNDSSave(const u8* savedata, u32 savelen, u32, u32, void*)
     rebit::StoreNDSSave(savedata, savelen);
 }
 void WriteGBASave(const u8*, u32, u32, u32, void*) {}
-void WriteFirmware(const Firmware&, u32, u32, void*) {}
+void WriteFirmware(const Firmware& firmware, u32, u32, void*) { rebit::StoreFirmware(firmware.Buffer(), firmware.Length()); }
 void WriteDateTime(int, int, int, int, int, int, void*) {}
 
 void MP_Begin(void*) {}
@@ -215,8 +216,9 @@ int MP_SendAck(u8*, int, u64, void*) { return 0; }
 int MP_RecvHostPacket(u8*, u64*, void*) { return 0; }
 u16 MP_RecvReplies(u8*, u64, u16, void*) { return 0; }
 
-int Net_SendPacket(u8*, int, void*) { return 0; }
-int Net_RecvPacket(u8*, void*) { return 0; }
+// melonDS's virtual access point (WifiAP) to the Rebit WFC proxy through libslirp (wfc/net_wfc.cpp)
+int Net_SendPacket(u8* data, int len, void*) { return rebit::wfc::SendPacket(data, len); }
+int Net_RecvPacket(u8* data, void*) { return rebit::wfc::RecvPacket(data); }
 
 void Camera_Start(int, void*) {}
 void Camera_Stop(int, void*) {}

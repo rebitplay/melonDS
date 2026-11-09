@@ -31,14 +31,26 @@ CORE_SOURCES := \
 	teakra/src/parser.cpp teakra/src/processor.cpp teakra/src/teakra.cpp
 CORE_C_SOURCES := fatfs/ff.c fatfs/ffsystem.c fatfs/ffunicode.c sha1/sha1.c tiny-AES-c/aes.c \
 	xxhash/xxhash.c blip-buf/blip_buf.c
-FRONTEND_SOURCES := recore_frontend.cpp platform.cpp rebit_gl.cpp
+FRONTEND_SOURCES := recore_frontend.cpp platform.cpp rebit_gl.cpp wfc/net_wfc.cpp
+
+# Nintendo WFC through the Rebit proxy (always on): libslirp turns the DS's Ethernet frames into
+# socket calls, which go to the non-blocking WebSocket layer in wfc/rebit_wfc_sock.c. Ported with
+# the 0.9.3 core's src/libretro/wfc (rebitplay/melonDS fb6fb23).
+WFC_DIR := $(ROOT)/rebit/recore/wfc
+SLIRP_SOURCES := $(addprefix libslirp/src/, arp_table.c bootp.c cksum.c dhcpv6.c dnssearch.c if.c \
+	ip6_icmp.c ip6_input.c ip6_output.c ip_icmp.c ip_input.c ip_output.c mbuf.c misc.c \
+	ncsi.c ndp_table.c sbuf.c slirp.c socket.c state.c stream.c tcp_input.c tcp_output.c \
+	tcp_subr.c tcp_timer.c tftp.c udp6.c udp.c util.c version.c vmstate.c) libslirp/glib/glib.c
+WFC_C_SOURCES := $(SLIRP_SOURCES) rebit_wfc_sock.c
+SLIRP_FLAGS := -I$(WFC_DIR)/libslirp/glib -I$(WFC_DIR)/libslirp/src -DLIBSLIRP_STATIC_BUILD -DBUILDING_LIBSLIRP \
+	-DG_LOG_DOMAIN=\"Slirp\" -DREBIT_WFC_REDIRECT -include $(WFC_DIR)/rebit_wfc_sock.h -w
 
 # melonDS's OpenGL renderer on WebGL2 (rebit/recore/rebit_gl.h): its GLSL as C strings
 SHADERS := $(notdir $(basename $(wildcard $(SRC)/OpenGL_shaders/*.glsl)))
 SHADER_HEADERS := $(SHADERS:%=$(OUT)/OpenGL_shaders/%.h)
 
 OBJECTS := $(CORE_SOURCES:%.cpp=$(OUT)/core/%.o) $(CORE_C_SOURCES:%.c=$(OUT)/core/%.o) \
-	$(FRONTEND_SOURCES:%.cpp=$(OUT)/frontend/%.o)
+	$(FRONTEND_SOURCES:%.cpp=$(OUT)/frontend/%.o) $(WFC_C_SOURCES:%.c=$(OUT)/wfc/%.o)
 
 INCLUDES := -I$(SRC) -I$(SRC)/teakra/include -I$(ROOT)/rebit/recore -I$(OUT)
 # the JIT with the WebAssembly back end (src/ARMJIT_WASM), DS only; the OpenGL renderer on WebGL2
@@ -69,6 +81,17 @@ $(OUT)/core/%.o: $(SRC)/%.c
 $(OUT)/frontend/%.o: $(ROOT)/rebit/recore/%.cpp $(OUT)/version.h $(SHADER_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OUT)/wfc/libslirp/%.o: $(WFC_DIR)/libslirp/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SLIRP_FLAGS) -c $< -o $@
+
+$(OUT)/wfc/rebit_wfc_sock.o: $(WFC_DIR)/rebit_wfc_sock.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# net_wfc.cpp includes libslirp.h
+$(OUT)/frontend/wfc/net_wfc.o: CXXFLAGS += -I$(WFC_DIR)/libslirp/src -DLIBSLIRP_STATIC_BUILD
 
 $(ARCHIVE): $(OBJECTS)
 	rm -f $@
