@@ -43,11 +43,17 @@ GLRenderer::GLRenderer(melonDS::NDS& nds, bool compute)
     Rend2D_B = std::make_unique<GLRenderer2D>(GPU.GPU2D_B, *this);
 
     // TODO, eventually: figure out a nicer way to support different 3D renderers?
+#ifdef __EMSCRIPTEN__
+    // WebGL2 has no compute shaders: the classic 3D renderer only
+    IsCompute = false;
+    Rend3D = std::make_unique<GLRenderer3D>(GPU.GPU3D, *this);
+#else
     IsCompute = compute;
     if (IsCompute)
         Rend3D = std::make_unique<ComputeRenderer3D>(GPU.GPU3D, *this);
     else
         Rend3D = std::make_unique<GLRenderer3D>(GPU.GPU3D, *this);
+#endif
 
     ScaleFactor = 0;
 }
@@ -146,7 +152,11 @@ bool GLRenderer::Init()
     glGenTextures(1, &AuxInputTex);
     glBindTexture(GL_TEXTURE_2D_ARRAY, AuxInputTex);
     glTexParams(GL_TEXTURE_2D_ARRAY, GL_REPEAT);
+#ifdef __EMSCRIPTEN__
+    rebitTexImage3D1555(GL_TEXTURE_2D_ARRAY, 0, 256, 256, 2, nullptr);
+#else
     glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGB5_A1, 256, 256, 2, 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, nullptr);
+#endif
 
     glGenTextures(1, &CaptureVRAMTex);
     glBindTexture(GL_TEXTURE_2D_ARRAY, CaptureVRAMTex);
@@ -173,7 +183,11 @@ bool GLRenderer::Init()
     glGenTextures(1, &CaptureSyncTex);
     glBindTexture(GL_TEXTURE_2D, CaptureSyncTex);
     glTexParams(GL_TEXTURE_2D, GL_CLAMP_TO_EDGE);
+#ifdef __EMSCRIPTEN__
+    rebitTexImage2D1555(GL_TEXTURE_2D, 0, 256, 256, nullptr);
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 256, 256, 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, nullptr);
+#endif
 
     glGenFramebuffers(1, &CaptureSyncFB);
     glBindFramebuffer(GL_FRAMEBUFFER, CaptureSyncFB);
@@ -329,12 +343,14 @@ void GLRenderer::SetRenderSettings(RendererSettings& settings)
     rend2d = dynamic_cast<GLRenderer2D*>(Rend2D_B.get());
     rend2d->SetScaleFactor(settings.ScaleFactor);
 
+#ifndef __EMSCRIPTEN__
     if (IsCompute)
     {
         auto rend3d = dynamic_cast<ComputeRenderer3D *>(Rend3D.get());
         rend3d->SetRenderSettings(settings.ScaleFactor, settings.HiresCoordinates);
     }
     else
+#endif
     {
         auto rend3d = dynamic_cast<GLRenderer3D *>(Rend3D.get());
         rend3d->SetRenderSettings(settings.ScaleFactor, settings.BetterPolygons);
@@ -570,13 +586,21 @@ void GLRenderer::RenderScreen(int ystart, int yend)
             glBindTexture(GL_TEXTURE_2D_ARRAY, AuxInputTex);
             if ((AuxUsageMask & (1<<0)) && (vramcap == -1))
             {
+#ifdef __EMSCRIPTEN__
+                rebitTexSubImage3D1555(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 256, 256, 1, AuxInputBuffer[0]);
+#else
                 glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, 256, 256, 1, GL_RGBA,
                                 GL_UNSIGNED_SHORT_1_5_5_5_REV, AuxInputBuffer[0]);
+#endif
             }
             if (AuxUsageMask & (1<<1))
             {
+#ifdef __EMSCRIPTEN__
+                rebitTexSubImage3D1555(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 1, 256, 192, 1, AuxInputBuffer[1]);
+#else
                 glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 1, 256, 192, 1, GL_RGBA,
                                 GL_UNSIGNED_SHORT_1_5_5_5_REV, AuxInputBuffer[1]);
+#endif
             }
         }
 
@@ -879,8 +903,12 @@ void GLRenderer::SyncVRAMCapture(u32 bank, u32 start, u32 len, bool complete)
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, CaptureSyncFB);
 
+#ifdef __EMSCRIPTEN__
+        rebitReadPixels1555(0, 0, 128, 128, &vram[start * 64 * 512]);
+#else
         glReadPixels(0, 0, 128, 128,
                      GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, &vram[start * 64 * 512]);
+#endif
 
         for (u32 j = start * 64; j < (start+1) * 64; j++)
             GPU.VRAMDirty[bank][j] = true;
@@ -898,8 +926,12 @@ void GLRenderer::SyncVRAMCapture(u32 bank, u32 start, u32 len, bool complete)
             if (end > 4)
                 end = 4;
 
+#ifdef __EMSCRIPTEN__
+            rebitReadPixels1555(0, pos * 64, 256, (end - pos) * 64, &vram[pos * 64 * 512]);
+#else
             glReadPixels(0, pos * 64, 256, (end - pos) * 64,
                          GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, &vram[pos * 64 * 512]);
+#endif
 
             for (u32 j = pos * 64; j < end * 64; j++)
                 GPU.VRAMDirty[bank][j] = true;

@@ -28,6 +28,14 @@ float GetSrcAPos(float line)
     return mix(a, b, fract(line));
 }
 
+// transparent outside input A (GL_CLAMP_TO_BORDER, which WebGL2 lacks)
+vec4 FetchA(vec2 coord)
+{
+    if (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0))))
+        return vec4(0.0);
+    return texture(InputTexA, coord);
+}
+
 void main()
 {
     vec2 coordA = fTexcoord.xy;
@@ -45,7 +53,7 @@ void main()
     if (uDstMode == 0)
     {
         // source A only
-        cap_out = ivec4(texture(InputTexA, coordA) * 255.0);
+        cap_out = ivec4(FetchA(coordA) * 255.0);
     }
     else if (uDstMode == 1)
     {
@@ -55,7 +63,7 @@ void main()
     else
     {
         // sources A and B blended
-        ivec4 srcA = ivec4(texture(InputTexA, coordA) * 255.0) >> 3;
+        ivec4 srcA = ivec4(FetchA(coordA) * 255.0) >> 3;
         ivec4 srcB = ivec4(texture(InputTexB, coordB) * uSrcBColorFactor) >> 3;
 
         int eva = uBlendFactors[0];

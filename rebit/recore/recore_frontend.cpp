@@ -20,6 +20,7 @@
 #include "Args.h"
 #include "GPU.h"
 #include "GPU_Soft.h"
+#include "GPU_OpenGL.h"
 #include "NDS.h"
 #include "NDSCart.h"
 #include "Platform.h"
@@ -59,6 +60,7 @@ struct LayoutInfo
 };
 
 std::unique_ptr<NDS> nds;
+void Log(retro_log_level level, const char* fmt, ...);
 std::vector<u8> romData;
 std::string romName;
 std::string savePath;
@@ -66,6 +68,12 @@ std::string savePath;
 Layout layout = Layout::TopBottom;
 bool touchEnabled = true;
 bool jitEnabled = true;
+
+// the OpenGL renderer on Recore's WebGL2 context (rebit_gl.h)
+bool glWanted = false;      // melonds_opengl_renderer, read at load
+bool glActive = false;      // the GLRenderer runs
+retro_hw_render_callback hwRender {};
+GLuint presentReadFB = 0;
 bool jitStats = false;
 bool jitBranchOptimizations = true;
 bool jitLiteralOptimizations = true;
@@ -121,6 +129,8 @@ void ReadVariables()
     }
     if (const char* value = GetVariable("melonds_touch_mode"))
         touchEnabled = strcmp(value, "Disabled") != 0;
+    if (const char* value = GetVariable("melonds_opengl_renderer"))
+        glWanted = strcmp(value, "enabled") == 0;
     if (const char* value = GetVariable("melonds_jit"))
         jitEnabled = strcmp(value, "disabled") != 0;
     if (const char* value = GetVariable("melonds_jit_stats"))
@@ -233,8 +243,60 @@ void UpdateInput()
     touching = touchNow;
 }
 
+// The GL renderer's two screens (layers of an array texture) into Recore's render target, by blits.
+void PresentGL()
+{
+    void* top = nullptr;
+    void* bottom = nullptr;
+    nds->GPU.GetRenderer().GetFramebuffers(&top, &bottom);
+    const GLuint texture = top ? *static_cast<GLuint*>(top) : 0;
+    const LayoutInfo info = CurrentLayout();
+
+    GLint oldRead = 0, oldDraw = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &oldRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &oldDraw);
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    glDisable(GL_SCISSOR_TEST);
+
+    if (!presentReadFB)
+        glGenFramebuffers(1, &presentReadFB);
+    const GLuint target = (GLuint)hwRender.get_current_framebuffer();
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // the renderer's size: 256x192 per screen times its scale
+    const int scale = 1;
+    const int w = ScreenW * scale, h = ScreenH * scale;
+    auto blit = [&](int layer, int x0, int y0) {
+        if (x0 < 0 || !texture)
+            return;
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, presentReadFB);
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0, layer);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        // Recore's target has its origin at the bottom left; the layout's at the top left
+        const int dy0 = info.height - y0 - ScreenH;
+        // the renderer's screens are stored top row first: flipped on the way
+        glBlitFramebuffer(0, h, w, 0, x0, dy0, x0 + ScreenW, dy0 + ScreenH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    };
+    blit(0, info.topX, info.topY);
+    blit(1, info.bottomX, info.bottomY);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, oldRead);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, oldDraw);
+    if (scissor)
+        glEnable(GL_SCISSOR_TEST);
+
+    video_cb(RETRO_HW_FRAME_BUFFER_VALID, info.width, info.height, 0);
+}
+
 void Present()
 {
+    if (glActive)
+    {
+        PresentGL();
+        return;
+    }
     void* top = nullptr;
     void* bottom = nullptr;
     if (!nds->GPU.GetRenderer().GetFramebuffers(&top, &bottom) || !top || !bottom)
@@ -250,6 +312,51 @@ void Present()
     blit(top, info.topX, info.topY);
     blit(bottom, info.bottomX, info.bottomY);
     video_cb(frameBuffer, info.width, info.height, info.width * sizeof(u32));
+}
+
+void GLContextReset()
+{
+    if (!nds)
+        return;
+    nds->SetRenderer(std::make_unique<GLRenderer>(*nds, false));
+    glActive = dynamic_cast<GLRenderer*>(&nds->GetRenderer()) != nullptr;
+    if (glActive)
+    {
+        RendererSettings settings {1, false, false, false};
+        nds->GetRenderer().SetRenderSettings(settings);
+        Log(RETRO_LOG_INFO, "melonDS: OpenGL renderer on WebGL2\n");
+    }
+    else
+    {
+        Log(RETRO_LOG_WARN, "melonDS: the OpenGL renderer did not start; software rendering\n");
+    }
+    presentReadFB = 0;
+}
+
+void GLContextDestroy()
+{
+    if (nds && glActive)
+    {
+        nds->SetRenderer(std::make_unique<SoftRenderer>(*nds));
+        RendererSettings settings {1, false, false, false};
+        nds->GetRenderer().SetRenderSettings(settings);
+    }
+    glActive = false;
+    presentReadFB = 0;
+}
+
+bool RequestGL()
+{
+    hwRender = {};
+    hwRender.context_type = RETRO_HW_CONTEXT_OPENGLES3;
+    hwRender.version_major = 3;
+    hwRender.version_minor = 0;
+    hwRender.context_reset = GLContextReset;
+    hwRender.context_destroy = GLContextDestroy;
+    hwRender.bottom_left_origin = true;
+    hwRender.depth = false;
+    hwRender.stencil = false;
+    return environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hwRender);
 }
 
 void DrainAudio()
@@ -357,7 +464,7 @@ RETRO_API void retro_set_environment(retro_environment_t cb)
         {"melonds_jit_literal", "JIT literal optimisation (diagnostics); enabled|disabled"},
         {"melonds_jit_block_size", "JIT maximum block size (diagnostics); 32|1|2|4|8|16"},
         {"melonds_jit_native", "JIT native groups (diagnostics: 1 ARM ALU, 2 ARM branch, 4 Thumb ALU, 8 Thumb branch, 16 memory, 32 register branches, 0x10000 idle loops); 0xffffffff|0|0x1|0x2|0x3|0x4|0x5|0x6|0x7|0x8|0x9|0xa|0xb|0xc|0xd|0xe|0xf|0x10|0x11|0x12|0x13|0x14|0x15|0x16|0x17|0x18|0x19|0x1a|0x1b|0x1c|0x1d|0x1e|0x1f|0x20|0x21|0x22|0x23|0x24|0x25|0x26|0x27|0x28|0x29|0x2a|0x2b|0x2c|0x2d|0x2e|0x2f|0x30|0x31|0x32|0x33|0x34|0x35|0x36|0x37|0x38|0x39|0x3a|0x3b|0x3c|0x3d|0x3e|0x3f|0x10000|0x10001|0x10002|0x10003|0x10004|0x10005|0x10006|0x10007|0x10008|0x10009|0x1000a|0x1000b|0x1000c|0x1000d|0x1000e|0x1000f|0x10010|0x10011|0x10012|0x10013|0x10014|0x10015|0x10016|0x10017|0x10018|0x10019|0x1001a|0x1001b|0x1001c|0x1001d|0x1001e|0x1001f|0x10020|0x10021|0x10022|0x10023|0x10024|0x10025|0x10026|0x10027|0x10028|0x10029|0x1002a|0x1002b|0x1002c|0x1002d|0x1002e|0x1002f|0x10030|0x10031|0x10032|0x10033|0x10034|0x10035|0x10036|0x10037|0x10038|0x10039|0x1003a|0x1003b|0x1003c|0x1003d|0x1003e|0x1003f"},
-        {"melonds_opengl_renderer", "OpenGL renderer (not yet in the 1.x core); disabled"},
+        {"melonds_opengl_renderer", "OpenGL renderer (WebGL2, read at load); disabled|enabled"},
         {"melonds_wfc_online", "Nintendo WFC online (not yet in the 1.x core); disabled"},
         {nullptr, nullptr},
     };
@@ -496,6 +603,12 @@ RETRO_API bool retro_load_game(const retro_game_info* game)
 
     nds = std::make_unique<NDS>(std::move(args));
     nds->SetRenderer(std::make_unique<SoftRenderer>(*nds));
+    glActive = false;
+    if (glWanted && !RequestGL())
+        Log(RETRO_LOG_WARN, "melonDS: no WebGL2 context for the OpenGL renderer; software rendering\n");
+    glActive = false;
+    if (glWanted && !RequestGL())
+        Log(RETRO_LOG_WARN, "melonDS: no WebGL2 context for the OpenGL renderer; software rendering\n");
     RendererSettings settings {1, false, false, false};
     nds->GetRenderer().SetRenderSettings(settings);
 

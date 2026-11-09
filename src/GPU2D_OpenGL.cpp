@@ -249,12 +249,20 @@ bool GLRenderer2D::Init()
     glGenTextures(1, &PalTex_BG);
     glBindTexture(GL_TEXTURE_2D, PalTex_BG);
     glDefaultTexParams(GL_TEXTURE_2D);
+#ifdef __EMSCRIPTEN__
+    rebitTexImage2D1555(GL_TEXTURE_2D, 0, 256, 1+(4*16), nullptr);
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 256, 1+(4*16), 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, nullptr);
+#endif
 
     glGenTextures(1, &PalTex_OBJ);
     glBindTexture(GL_TEXTURE_2D, PalTex_OBJ);
     glDefaultTexParams(GL_TEXTURE_2D);
+#ifdef __EMSCRIPTEN__
+    rebitTexImage2D1555(GL_TEXTURE_2D, 0, 256, 1+16, nullptr);
+#else
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB5_A1, 256, 1+16, 0, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, nullptr);
+#endif
 
     // generate texture to hold pre-rendered BG layers
 
@@ -733,8 +741,12 @@ void GLRenderer2D::UpdateAndRender(int line)
         }
 
         glBindTexture(GL_TEXTURE_2D, PalTex_BG);
+#ifdef __EMSCRIPTEN__
+        rebitTexSubImage2D1555(GL_TEXTURE_2D, 0, 0, 0, 256, 1+(4*16), TempPalBuffer);
+#else
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1+(4*16), GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV,
                         TempPalBuffer);
+#endif
     }
 
     GPU.PaletteDirty &= ~palmask;
@@ -788,7 +800,11 @@ void GLRenderer2D::UpdateAndRender(int line)
 
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, PalTex_OBJ);
+#ifdef __EMSCRIPTEN__
+        rebitTexSubImage2D1555(GL_TEXTURE_2D, 0, 0, 0, 256, 1+16, TempPalBuffer);
+#else
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1+16, GL_RGBA, GL_UNSIGNED_SHORT_1_5_5_5_REV, TempPalBuffer);
+#endif
 
         PrerenderSprites();
 

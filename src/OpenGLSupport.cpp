@@ -258,6 +258,11 @@ bool LinkProgram(GLuint& result, GLuint* ids, int numIds)
 
 bool CompileComputeProgram(GLuint& result, const std::string& source, const std::string& name)
 {
+#ifdef __EMSCRIPTEN__
+    // WebGL2 has no compute shaders
+    Log(LogLevel::Error, "OpenGL: no compute shaders on WebGL2 (%s)\n", name.c_str());
+    return false;
+#else
     result = glCreateProgram();
 
     /*u64 sourceHash = XXH64(source.data(), source.size(), 0);
@@ -313,7 +318,55 @@ error:
     }*/
 
     return linkingSucess;
+#endif
 }
+
+#ifdef __EMSCRIPTEN__
+// GLSL 1.40 to GLSL ES 3.00 for WebGL2: the version line, default precisions, and fragment outputs
+// at the locations glBindFragDataLocation would have given them.
+static std::string ToGLSLES(const std::string& source, const std::initializer_list<AttributeTarget>* fragmentOutAttrs)
+{
+    std::string out = source;
+    const std::string version = "#version 140";
+    size_t pos = out.find(version);
+    const std::string header =
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+        "precision highp sampler2D;\n"
+        "precision highp isampler2D;\n"
+        "precision highp usampler2D;\n"
+        "precision highp sampler2DArray;\n"
+        "precision highp usampler2DArray;\n";
+    if (pos != std::string::npos)
+        out.replace(pos, version.size(), header);
+    else
+        out = header + out;
+
+    if (fragmentOutAttrs)
+    {
+        for (const AttributeTarget& target : *fragmentOutAttrs)
+        {
+            // "out <type> <name>;" -> "layout(location = N) out <type> <name>;"
+            const std::string name = std::string(" ") + target.Name + ";";
+            size_t at = 0;
+            while ((at = out.find(name, at)) != std::string::npos)
+            {
+                size_t line = out.rfind('\n', at);
+                line = line == std::string::npos ? 0 : line + 1;
+                if (out.compare(line, 4, "out ") == 0)
+                {
+                    const std::string layout = "layout(location = " + std::to_string(target.Location) + ") ";
+                    out.insert(line, layout);
+                    break;
+                }
+                at += name.size();
+            }
+        }
+    }
+    return out;
+}
+#endif
 
 bool CompileVertexFragmentProgram(GLuint& result,
     const std::string& vs, const std::string& fs,
@@ -330,11 +383,19 @@ bool CompileVertexFragmentProgram(GLuint& result,
 
     bool linkingSucess = false;
 
+#ifdef __EMSCRIPTEN__
+    if (!CompilerShader(shaders[0], ToGLSLES(vs, nullptr), name, "vertex"))
+        goto error;
+
+    if (!CompilerShader(shaders[1], ToGLSLES(fs, &fragmentOutAttrs), name, "fragment"))
+        goto error;
+#else
     if (!CompilerShader(shaders[0], vs, name, "vertex"))
         goto error;
 
     if (!CompilerShader(shaders[1], fs, name, "fragment"))
         goto error;
+#endif
 
 
     for (const AttributeTarget& target : vertexInAttrs)

@@ -21,6 +21,7 @@ CORE_SOURCES := \
 	GPU.cpp GPU_Soft.cpp GPU2D.cpp GPU2D_Soft.cpp GPU3D.cpp GPU3D_Soft.cpp GPU3D_Texcache.cpp Mic.cpp \
 	NDS.cpp NDSCart.cpp ROMList.cpp FreeBIOS.cpp RTC.cpp Savestate.cpp SPI.cpp SPI_Firmware.cpp SPU.cpp \
 	Utils.cpp Wifi.cpp WifiAP.cpp \
+	GPU_OpenGL.cpp GPU2D_OpenGL.cpp GPU3D_OpenGL.cpp GPU3D_TexcacheOpenGL.cpp OpenGLSupport.cpp \
 	ARMJIT.cpp ARMJIT_Memory.cpp ARM_InstrInfo.cpp ARMJIT_WASM/ARMJIT_Compiler.cpp ARMJIT_WASM/ARMJIT_ALU.cpp ARMJIT_WASM/ARMJIT_LoadStore.cpp \
 	DSP_HLE/UcodeBase.cpp DSP_HLE/AACUcode.cpp DSP_HLE/G711Ucode.cpp DSP_HLE/GraphicsUcode.cpp \
 	NDSCart/CartCommon.cpp NDSCart/CartRetail.cpp NDSCart/CartRetailNAND.cpp NDSCart/CartRetailIR.cpp \
@@ -30,14 +31,19 @@ CORE_SOURCES := \
 	teakra/src/parser.cpp teakra/src/processor.cpp teakra/src/teakra.cpp
 CORE_C_SOURCES := fatfs/ff.c fatfs/ffsystem.c fatfs/ffunicode.c sha1/sha1.c tiny-AES-c/aes.c \
 	xxhash/xxhash.c blip-buf/blip_buf.c
-FRONTEND_SOURCES := recore_frontend.cpp platform.cpp
+FRONTEND_SOURCES := recore_frontend.cpp platform.cpp rebit_gl.cpp
+
+# melonDS's OpenGL renderer on WebGL2 (rebit/recore/rebit_gl.h): its GLSL as C strings
+SHADERS := $(notdir $(basename $(wildcard $(SRC)/OpenGL_shaders/*.glsl)))
+SHADER_HEADERS := $(SHADERS:%=$(OUT)/OpenGL_shaders/%.h)
 
 OBJECTS := $(CORE_SOURCES:%.cpp=$(OUT)/core/%.o) $(CORE_C_SOURCES:%.c=$(OUT)/core/%.o) \
 	$(FRONTEND_SOURCES:%.cpp=$(OUT)/frontend/%.o)
 
 INCLUDES := -I$(SRC) -I$(SRC)/teakra/include -I$(ROOT)/rebit/recore -I$(OUT)
-# the JIT with the WebAssembly back end (src/ARMJIT_WASM), DS only
-COMMON_FLAGS := -fwrapv -DJIT_ENABLED -DREBIT_JIT_NDS_ONLY $(INCLUDES) $(RECORE_DEFINES)
+# the JIT with the WebAssembly back end (src/ARMJIT_WASM), DS only; the OpenGL renderer on WebGL2
+COMMON_FLAGS := -fwrapv -DJIT_ENABLED -DREBIT_JIT_NDS_ONLY -DOGLRENDERER_ENABLED \
+	-DMELONDS_GL_HEADER='"rebit_gl.h"' $(INCLUDES) $(RECORE_DEFINES)
 override CXXFLAGS += -std=c++17 -Wno-invalid-offsetof -MMD -MP $(COMMON_FLAGS)
 override CFLAGS += -MMD -MP $(COMMON_FLAGS)
 
@@ -48,7 +54,11 @@ $(OUT)/version.h: $(SRC)/version.h.in
 	sed -e 's|$${melonDS_HOMEPAGE_URL}|https://melonds.kuribo64.net|' -e 's|$${melonDS_VERSION}|$(MELONDS_VERSION)|' \
 	    -e 's|$${MELONDS_VERSION_SUFFIX}||' $< > $@
 
-$(OUT)/core/%.o: $(SRC)/%.cpp $(OUT)/version.h
+$(OUT)/OpenGL_shaders/%.h: $(SRC)/OpenGL_shaders/%.glsl
+	@mkdir -p $(dir $@)
+	{ printf 'const char* k%s = R"(' '$*'; cat $<; printf ')";\n'; } > $@
+
+$(OUT)/core/%.o: $(SRC)/%.cpp $(OUT)/version.h $(SHADER_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -56,7 +66,7 @@ $(OUT)/core/%.o: $(SRC)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OUT)/frontend/%.o: $(ROOT)/rebit/recore/%.cpp $(OUT)/version.h
+$(OUT)/frontend/%.o: $(ROOT)/rebit/recore/%.cpp $(OUT)/version.h $(SHADER_HEADERS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
