@@ -3,7 +3,7 @@
 struct sOAM
 {
     ivec2 Position;
-    bvec2 Flip;
+    ivec2 Flip;
     ivec2 Size;
     ivec2 BoundSize;
     int OBJMode;
@@ -13,7 +13,7 @@ struct sOAM
     int TileStride;
     int Rotscale;
     int BGPrio;
-    bool Mosaic;
+    int Mosaic;
 };
 
 layout(std140) uniform ubSpriteConfig
@@ -45,7 +45,7 @@ void main()
     if (uOAM[vSpriteIndex].Rotscale == -1)
     {
         vec2 tmp = vec2(vTexcoord) * sprsize;
-        fTexcoord = mix(tmp, (sprsize - tmp), uOAM[vSpriteIndex].Flip);
+        fTexcoord = mix(tmp, (sprsize - tmp), notEqual(uOAM[vSpriteIndex].Flip, ivec2(0)));
     }
     else
         fTexcoord = (vec2(vTexcoord) * sprsize) - (sprsize / 2.0);

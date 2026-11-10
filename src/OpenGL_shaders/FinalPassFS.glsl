@@ -6,7 +6,7 @@ uniform sampler2DArray AuxInputTex;
 
 layout(std140) uniform ubFinalPassConfig
 {
-    bvec4 uScreenSwap[48]; // one bool per scanline
+    ivec4 uScreenSwap[48]; // one flag per scanline (an int: bool types in uniform blocks are fragile on some GPU drivers)
     int uScaleFactor;
     int uAuxLayer;
     int uDispModeA;
@@ -82,7 +82,7 @@ void main()
     output_sub = (output_sub << 2) | (output_sub >> 6);
 
     int line = int(fTexcoord.y * 192.0);
-    bool swapbit = uScreenSwap[line>>2][line&0x3];
+    bool swapbit = uScreenSwap[line>>2][line&0x3] != 0;
 
     if (!swapbit)
     {

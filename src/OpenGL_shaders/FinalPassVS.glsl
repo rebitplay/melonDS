@@ -2,7 +2,7 @@
 
 layout(std140) uniform ubFinalPassConfig
 {
-    bvec4 uScreenSwap[48]; // one bool per scanline
+    ivec4 uScreenSwap[48]; // one flag per scanline (an int: bool types in uniform blocks are fragile on some GPU drivers)
     int uScaleFactor;
     int uAuxLayer;
     int uDispModeA;

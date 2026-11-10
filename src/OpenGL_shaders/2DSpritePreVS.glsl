@@ -3,7 +3,7 @@
 struct sOAM
 {
     ivec2 Position;
-    bvec2 Flip;
+    ivec2 Flip;
     ivec2 Size;
     ivec2 BoundSize;
     int OBJMode;
@@ -13,7 +13,7 @@ struct sOAM
     int TileStride;
     int Rotscale;
     int BGPrio;
-    bool Mosaic;
+    int Mosaic;
 };
 
 layout(std140) uniform ubSpriteConfig

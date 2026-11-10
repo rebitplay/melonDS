@@ -7,7 +7,7 @@ uniform sampler2DArray Capture256Tex;
 struct sOAM
 {
     ivec2 Position;
-    bvec2 Flip;
+    ivec2 Flip;
     ivec2 Size;
     ivec2 BoundSize;
     int OBJMode;
@@ -17,7 +17,7 @@ struct sOAM
     int TileStride;
     int Rotscale;
     int BGPrio;
-    bool Mosaic;
+    int Mosaic;
 };
 
 layout(std140) uniform ubSpriteConfig
@@ -53,7 +53,7 @@ void main()
     vec4 col, flags = vec4(0);
     vec2 coord = fTexcoord;
 
-    if (uOAM[fSpriteIndex].Mosaic)
+    if (uOAM[fSpriteIndex].Mosaic != 0)
     {
         int line = int(fPosition.y);
         int mosline = uMosaicLine[line>>2][line&0x3];
@@ -84,7 +84,7 @@ void main()
     {
         // set BG priority and mosaic flags for transparent pixels
 
-        if (uOAM[fSpriteIndex].Mosaic)
+        if (uOAM[fSpriteIndex].Mosaic != 0)
             flags.g = 1.0;
 
         flags.a = float(uOAM[fSpriteIndex].BGPrio) / 255.0;
@@ -139,7 +139,7 @@ void main()
             flags.r = 2.0 / 255.0;
         }
 
-        if (uOAM[fSpriteIndex].Mosaic)
+        if (uOAM[fSpriteIndex].Mosaic != 0)
             flags.g = 1.0;
 
         flags.a = float(uOAM[fSpriteIndex].BGPrio) / 255.0;

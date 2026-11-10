@@ -13,7 +13,7 @@ struct sBGConfig
     int PalOffset;
     int TileOffset;
     int MapOffset;
-    bool Clamp;
+    int Clamp;
 };
 
 layout(std140) uniform ubBGConfig
@@ -30,7 +30,7 @@ struct sScanline
     uint WinRegs;
     int WinMask;
     ivec4 WinPos;
-    bvec4 BGMosaicEnable;
+    ivec4 BGMosaicEnable;
     ivec4 MosaicSize;
 };
 
@@ -42,8 +42,8 @@ layout(std140) uniform ubScanlineConfig
 layout(std140) uniform ubCompositorConfig
 {
     ivec4 uBGPrio;
-    bool uEnableOBJ;
-    bool uEnable3D;
+    int uEnableOBJ;
+    int uEnable3D;
     int uBlendCnt;
     int uBlendEffect;
     ivec3 uBlendCoef;
@@ -69,7 +69,7 @@ ivec3 ConvertColor(int col)
 vec4 BG0Fetch(vec2 coord)
 {
     // transparent outside a clamped layer (GL_CLAMP_TO_BORDER, which WebGL2 lacks)
-    if (uBGConfig[0].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+    if (uBGConfig[0].Clamp != 0 && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
         return vec4(0.0);
     return texture(BGLayerTex[0], coord);
 }
@@ -77,7 +77,7 @@ vec4 BG0Fetch(vec2 coord)
 vec4 BG1Fetch(vec2 coord)
 {
     // transparent outside a clamped layer (GL_CLAMP_TO_BORDER, which WebGL2 lacks)
-    if (uBGConfig[1].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+    if (uBGConfig[1].Clamp != 0 && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
         return vec4(0.0);
     return texture(BGLayerTex[1], coord);
 }
@@ -85,7 +85,7 @@ vec4 BG1Fetch(vec2 coord)
 vec4 BG2Fetch(vec2 coord)
 {
     // transparent outside a clamped layer (GL_CLAMP_TO_BORDER, which WebGL2 lacks)
-    if (uBGConfig[2].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+    if (uBGConfig[2].Clamp != 0 && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
         return vec4(0.0);
     return texture(BGLayerTex[2], coord);
 }
@@ -93,7 +93,7 @@ vec4 BG2Fetch(vec2 coord)
 vec4 BG3Fetch(vec2 coord)
 {
     // transparent outside a clamped layer (GL_CLAMP_TO_BORDER, which WebGL2 lacks)
-    if (uBGConfig[3].Clamp && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
+    if (uBGConfig[3].Clamp != 0 && (any(lessThan(coord, vec2(0.0))) || any(greaterThanEqual(coord, vec2(1.0)))))
         return vec4(0.0);
     return texture(BGLayerTex[3], coord);
 }
@@ -103,7 +103,7 @@ vec4 BG0CalcAndFetch(vec2 coord, int line)
     ivec2 bgoffset = uScanline[line].BGOffset[0];
     vec2 bgpos = vec2(bgoffset.xy) + coord;
 
-    if (uScanline[line].BGMosaicEnable[0])
+    if (uScanline[line].BGMosaicEnable[0] != 0)
     {
         bgpos = floor(bgpos) - vec2(MosaicX, 0);
     }
@@ -116,7 +116,7 @@ vec4 BG1CalcAndFetch(vec2 coord, int line)
     ivec2 bgoffset = uScanline[line].BGOffset[1];
     vec2 bgpos = vec2(bgoffset.xy) + coord;
 
-    if (uScanline[line].BGMosaicEnable[1])
+    if (uScanline[line].BGMosaicEnable[1] != 0)
     {
         bgpos = floor(bgpos) - vec2(MosaicX, 0);
     }
@@ -142,7 +142,7 @@ vec4 BG2CalcAndFetch(vec2 coord, int line)
         bgpos = vec2(bgoffset.xy) + coord;
     }
 
-    if (uScanline[line].BGMosaicEnable[2])
+    if (uScanline[line].BGMosaicEnable[2] != 0)
     {
         bgpos = floor(bgpos) - vec2(MosaicX, 0);
     }
@@ -155,7 +155,7 @@ vec4 BG2CalcAndFetch(vec2 coord, int line)
 
         // due to the possible weirdness of display capture buffers,
         // we need to do custom wraparound handling
-        if (uBGConfig[2].Clamp)
+        if (uBGConfig[2].Clamp != 0)
         {
             if (any(lessThan(capcoord.xy, vec2(0))) || any(greaterThanEqual(capcoord.xy, vec2(1))))
                 return vec4(0);
@@ -188,7 +188,7 @@ vec4 BG3CalcAndFetch(vec2 coord, int line)
         bgpos = vec2(bgoffset.xy) + coord;
     }
 
-    if (uScanline[line].BGMosaicEnable[3])
+    if (uScanline[line].BGMosaicEnable[3] != 0)
     {
         bgpos = floor(bgpos) - vec2(MosaicX, 0);
     }
@@ -201,7 +201,7 @@ vec4 BG3CalcAndFetch(vec2 coord, int line)
 
         // due to the possible weirdness of display capture buffers,
         // we need to do custom wraparound handling
-        if (uBGConfig[3].Clamp)
+        if (uBGConfig[3].Clamp != 0)
         {
             if (any(lessThan(capcoord.xy, vec2(0))) || any(greaterThanEqual(capcoord.xy, vec2(1))))
                 return vec4(0);
@@ -322,11 +322,11 @@ vec4 CompositeLayers()
                 mask2 = mask1 << 8;
                 col1 = ivec4(layercol[bg] * 255.0) >> ivec4(2,2,2,3);
                 mask1 = (1 << bg);
-                specialcase = (bg == 0) && uEnable3D;
+                specialcase = (bg == 0) && (uEnable3D != 0);
             }
         }
 
-        if (uEnableOBJ && (objflags.a == prio) && (layercol[4].a > 0.0) && ((winsel & (1u << 4)) != 0u))
+        if ((uEnableOBJ != 0) && (objflags.a == prio) && (layercol[4].a > 0.0) && ((winsel & (1u << 4)) != 0u))
         {
             col2 = col1;
             mask2 = mask1 << 8;
